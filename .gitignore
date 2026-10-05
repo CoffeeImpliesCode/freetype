@@ -1,0 +1,71 @@
+# Upstream's own ignore conventions: this release ships none.
+#
+# The FreeType 2.14.3 tarball carries no `.gitignore` at any depth, so there is
+# no upstream entry here to preserve, re-include or make room for, and nothing
+# below removes one. Upstream's ignore rules live in its development repository,
+# which is not a source for this tree.
+#
+# What follows is the fork's own list. The first block is the build output
+# upstream's own build systems would leave in this tree if a contributor ran
+# them here; the entries are named after artefacts, not after a guess.
+#
+# SPDX-License-Identifier: MIT
+# See FORK-LICENSE.md for what that identifier covers.
+
+# Upstream's object directory, named at `Makefile:29`
+# (`OBJ_DIR ?= $(TOP_DIR)/objs`). It is the one directory the release carries and
+# this tree does not, and `build.zig.zon`'s `.paths` does not name it either.
+objs/
+
+# Object, archive, shared-object and import-library output. `MSBuild.rsp` and
+# `MSBuild.sln` are in the tree, so a Visual Studio or MinGW build here would
+# produce these beside the sources.
+*.o
+*.a
+*.so
+*.so.*
+*.obj
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.dll
+*.exe
+*.manifest
+
+# zig build artefacts (fork addition).
+#
+# These are directories rather than single files because a normal `zig build`
+# creates them, and a normal `zig build` must not dirty the tree or leak into
+# the package published from it. None of them is named in build.zig.zon
+# `.paths`, so an ignored directory can never become part of the package.
+.zig-cache/
+zig-out/
+# Zig 0.16 materialises a fetched dependency into a project-local directory.
+# This package declares no dependencies, so this exists only so that a future
+# one cannot commit a fetched tree.
+zig-pkg/
+# The consumer package builds inside this repository and has its own cache and
+# output tree. The entries carry the `consumer/` prefix rather than living in a
+# file of their own, so a build run from the repository root cannot commit them
+# by accident and so this package has no second ignore file to keep in step.
+consumer/.zig-cache/
+consumer/zig-out/
+consumer/zig-pkg/
+
+# Nix and devenv working-tree artefacts (fork addition).
+#
+# `nix build` writes `result` (and `result-1`, `result-2`, ... on a rebuild)
+# into the directory that asked for it, and `devenv` writes its resolved
+# inputs and its state beside the project. None of them is named in
+# build.zig.zon `.paths`, so an ignored path can never become part of the
+# package either. `devenv.lock` and `flake.lock` are deliberately *not* here:
+# they are real inputs, they belong to the driver, and ignoring them would be
+# the wrong way to keep a build out of a commit.
+result
+result-*
+.devenv/
+.devenv.flake.nix
+.devenv.flakes/
+devenv.local.nix
+.direnv/

@@ -1,0 +1,568 @@
+# Verification for the Zig package in this repository.
+#
+# Upstream ships no GitHub Actions workflow in this tree, so this file is
+# entirely the fork's, and it gates the artifacts this fork delivers rather than
+# retargeting anything upstream owns.
+#
+# Five jobs, five different questions:
+#   native      does the whole forty-unit closure compile and link, do the tests
+#               and the example run, and does the *installed* tree serve a plain C
+#               consumer that opens a font and measures it
+#   shared      the same, through `-Dlinkage=dynamic`: a real shared object with
+#               upstream's SONAME, an export surface of exactly `FT_*`, and a C
+#               consumer that reaches it through the installed pkg-config file
+#   runtime     the same tests and example again with `-Druntime=true`, against
+#               the shared object this build just produced as the named provider
+#   cross       do the library, the facade, the tests and the example compile for
+#               each of the six check targets, running nothing, in both linkages
+#   consumer    does the published module resolve from a package that did not
+#               write it, in all three configurations
+#
+# The two linkages share one `native` job rather than being two jobs: the C gate
+# program below is written once and used against both deliveries, and sharing it
+# is what makes the comparison meaningful — the same program has to pass linked
+# against `libfreetype.a` and against `libfreetype.so.6`.
+#
+# There is no `continue-on-error` here and no matrix with a tolerated target.
+# Each target is a separate step on purpose: a matrix row allowed to fail is
+# indistinguishable from a target that was quietly dropped, and "we know that
+# one is broken" is only a fact once a gate run has printed the failure. If a
+# target ever turns out to be unsupported here, the honest edit is to replace
+# that step with a command that asserts the specific documented failure and to
+# record the run in FORK-NOTES.md, not to add a flag that hides it.
+#
+# System-library mode (`-fsys=freetype` / `-Dsystem=true`) is deliberately not a
+# step here: it needs an installed libfreetype with its own headers, and a stock
+# runner has neither. It is gated on a machine that has it, and a claim about it
+# needs that run, not this file.
+#
+# The full 53-platform matrix is not in this file either. `cross-test`, run from
+# the package root, builds and *runs* `tests.zig` for every platform in Zig
+# 0.16.0's published Tier 1/2 table through this repository's own build graph,
+# using `cross-test.profile.sh` for its settings. It is not a job here because
+# `cross-test` is a host-local tool with its own runner detection and its own
+# scratch policy, not something a GitHub runner has. So this file does not
+# pretend to cover it and does not stand in for it: the `cross` jobs run nothing,
+# and a platform with no runner on the host is recorded as explicit `build_only`
+# coverage, never as a pass. The command and its receipts belong in README.md and
+# FORK-NOTES.md.
+
+name: verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: native build, tests, example and installed closure
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      # The bytes, the exact upstream file set, the vendored fixture, the one
+      # release the records name, and the licence notices. Nothing here compiles.
+      - name: immutable source and licence records
+        run: |
+          set -euo pipefail
+          sha256sum -c UPSTREAM.sha256
+          tools/check-provenance.sh
+
+      # One C program, used against both deliveries below. Every number it
+      # checks is a property of the fixture font that `tests.zig` also decodes
+      # itself, in Zig, out of the same bytes: this program is a second reader
+      # reaching the same answers through the installed C headers, which is what
+      # makes it a statement about the C API and not about this build graph.
+      - name: write the C gate program
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/c_gate.c" <<'C'
+
+          /* Answers about tests/fixtures/HarfBust.ttf, the fixture the package
+             embeds. The font is HarfBuzz's own Latin in-house test font, and the
+             numbers below are its own table values: unitsPerEm and the glyph
+             count out of `head` and `maxp`, the two character mappings out of
+             `cmap`, the advance out of `hmtx`, and the bounding box out of
+             `glyf`. tests.zig reads the same five tables in Zig and asserts
+             the same values against FreeType, so a C gate and a Zig test that
+             disagree mean one of the two is wrong. */
+
+          #include <ft2build.h>
+          #include <freetype/freetype.h>
+
+          #include <stdio.h>
+          #include <string.h>
+
+          static int failures = 0;
+
+          static void
+          check( int condition, const char* what )
+          {
+            if ( !condition )
+            {
+              fprintf( stderr, "c_gate: %s\n", what );
+              failures++;
+            }
+          }
+
+          int
+          main( int argc, char** argv )
+          {
+            FT_Library    library = NULL;
+            FT_Face       face     = NULL;
+            FT_GlyphSlot  slot;
+            FT_BBox       box;
+            FT_Error      error;
+            char          name[64];
+            int           major, minor, patch;
+            int           inked = 0;
+            unsigned int  i;
+            const char*   path = ( argc > 1 ) ? argv[1] : NULL;
+
+            if ( path == NULL )
+            {
+              fprintf( stderr, "c_gate: no font path given\n" );
+              return 1;
+            }
+
+            error = FT_Init_FreeType( &library );
+            check( error == FT_Err_Ok && library != NULL, "FT_Init_FreeType" );
+            if ( error != FT_Err_Ok )
+              return 1;
+
+            /* What the library answers is not what the header said, and the two
+               have to agree for the ABI to be the one a consumer expects. */
+            FT_Library_Version( library, &major, &minor, &patch );
+            check( major == FREETYPE_MAJOR, "library major matches the header" );
+            check( minor == FREETYPE_MINOR, "library minor matches the header" );
+            check( patch == FREETYPE_PATCH, "library patch matches the header" );
+
+            error = FT_New_Face( library, path, 0, &face );
+            check( error == FT_Err_Ok && face != NULL, "FT_New_Face" );
+            if ( error != FT_Err_Ok )
+            {
+              FT_Done_FreeType( library );
+              return 1;
+            }
+
+            check( face->num_faces == 1, "one face in the file" );
+            check( face->units_per_EM == 2048, "units_per_EM is 2048" );
+            check( face->num_glyphs == 99, "num_glyphs is 99" );
+            check( face->family_name != NULL, "family_name is present" );
+
+            /* The charmap, out of the font's own `cmap` table. */
+            check( FT_Get_Char_Index( face, 'A' ) == 3, "'A' is glyph 3" );
+            check( FT_Get_Char_Index( face, 'H' ) == 10, "'H' is glyph 10" );
+            check( FT_Get_Char_Index( face, 'a' ) == 28, "'a' is glyph 28" );
+            check( FT_Get_Char_Index( face, 'z' ) == 53, "'z' is glyph 53" );
+            /* An unmapped codepoint is .notdef, which is a real answer. */
+            check( FT_Get_Char_Index( face, 0x4E2D ) == 0, "U+4E2D is .notdef" );
+
+            /* Font units, unhinted: the number is out of `hmtx`. */
+            error = FT_Load_Glyph( face, 10, FT_LOAD_NO_SCALE | FT_LOAD_NO_HINTING );
+            check( error == FT_Err_Ok, "FT_Load_Glyph with NO_SCALE" );
+            slot = face->glyph;
+            check( slot->metrics.horiAdvance == 1022, "'H' advance is 1022 font units" );
+            check( slot->linearHoriAdvance == ( 1022L << 16 ),
+                   "linearHoriAdvance is 1022 in 16.16" );
+            check( slot->outline.n_points == 12, "'H' has 12 outline points" );
+            check( slot->outline.n_contours == 1, "'H' has one contour" );
+
+            FT_Outline_Get_CBox( &slot->outline, &box );
+            check( box.xMin == 78, "'H' control box xMin is 78" );
+            check( box.yMax == 1760, "'H' control box yMax is 1760" );
+
+            check( FT_Get_Advance( face, 10, FT_LOAD_NO_SCALE, &slot->linearHoriAdvance )
+                     == FT_Err_Ok,
+                   "FT_Get_Advance with NO_SCALE" );
+            check( slot->linearHoriAdvance == ( 1022L << 16 ),
+                   "FT_Get_Advance is 1022 in 16.16" );
+
+            /* The `post` table's name for glyph 10. */
+            error = FT_Get_Glyph_Name( face, 10, name, sizeof name );
+            check( error == FT_Err_Ok && strcmp( name, "H" ) == 0, "glyph 10 is named H" );
+
+            /* 26.6 pixels at 16 points: font_units * ppem * 64 / unitsPerEm =
+               1022 * 16 * 64 / 2048 = 511, computed here rather than copied. */
+            error = FT_Set_Char_Size( face, 0, 16 * 64, 0, 0 );
+            check( error == FT_Err_Ok, "FT_Set_Char_Size to 16pt" );
+            error = FT_Load_Glyph( face, 10, FT_LOAD_NO_HINTING );
+            check( error == FT_Err_Ok, "FT_Load_Glyph at 16pt" );
+            check( face->glyph->metrics.horiAdvance == 511, "'H' advance is 511 at 16pt" );
+
+            /* A render, and the ink in it. */
+            error = FT_Load_Glyph( face, 10, FT_LOAD_NO_HINTING | FT_LOAD_RENDER );
+            check( error == FT_Err_Ok, "FT_Load_Glyph with RENDER" );
+            check( face->glyph->bitmap.num_grays == 256, "256 grey levels" );
+            check( face->glyph->bitmap.rows > 0, "the bitmap has rows" );
+            check( face->glyph->bitmap.width > 0, "the bitmap has width" );
+            if ( face->glyph->bitmap.buffer != NULL )
+              for ( i = 0; i < (unsigned int)face->glyph->bitmap.width *
+                               (unsigned int)face->glyph->bitmap.rows; i++ )
+                if ( face->glyph->bitmap.buffer[i] != 0 )
+                  inked++;
+            check( inked > 0, "the rendered 'H' has ink in it" );
+
+            /* The two error paths a C consumer has to be able to tell apart. */
+            check( FT_Set_Pixel_Sizes( face, 0, 0 ) == FT_Err_Invalid_Pixel_Size,
+                   "a zero pixel size is Invalid_Pixel_Size" );
+            {
+              FT_Face missing = NULL;
+              check( FT_New_Face( library, "/nonexistent-freetype-fixture/no.ttf",
+                                  0, &missing ) == FT_Err_Cannot_Open_Resource,
+                     "a missing file is Cannot_Open_Resource" );
+              check( missing == NULL, "no face was created for it" );
+            }
+
+            /* An index past the end of the font is an error, not a glyph. */
+            check( FT_Load_Glyph( face, face->num_glyphs,
+                                  FT_LOAD_NO_SCALE | FT_LOAD_NO_HINTING )
+                     == FT_Err_Invalid_Glyph_Index,
+                   "a glyph index past the end is Invalid_Glyph_Index" );
+
+            check( FT_Done_Face( face ) == FT_Err_Ok, "FT_Done_Face" );
+            check( FT_Done_FreeType( library ) == FT_Err_Ok, "FT_Done_FreeType" );
+
+            if ( failures )
+            {
+              fprintf( stderr, "installed C surface FAILED (%d checks)\n", failures );
+              return 1;
+            }
+            printf( "installed C surface compiled, linked and ran\n" );
+            return 0;
+          }
+          C
+
+      # ---------------------------------------------------------------- static
+
+      - name: build (static, the default)
+        run: zig build --summary all
+
+      # The installed closure is the deliverable, so it is checked as a layout
+      # and not as a source drop.
+      - name: static installed closure is complete
+        run: |
+          set -euo pipefail
+          test -f zig-out/lib/libfreetype.a
+          test ! -e zig-out/lib/libfreetype.so
+          test -f zig-out/lib/pkgconfig/freetype2.pc
+          # The 46 headers meson.build lists, plus ft2build.h installed beside
+          # them, so that one -I satisfies the recipe freetype.h gives.
+          installed=$(find zig-out/include/freetype2 -name '*.h' | wc -l)
+          test "$installed" -eq 47
+          test -f zig-out/include/freetype2/ft2build.h
+          test -f zig-out/include/freetype2/freetype/freetype.h
+          test -f zig-out/include/freetype2/freetype/ftcache.h
+          # The licence and provenance records that travel with the binary: both
+          # arms of upstream's dual grant, the per-file exceptions, the vendored
+          # font's licence, and this fork's own records.
+          for record in LICENSE.TXT FTL.TXT GPLv2.TXT README COPYING NOTICE.md \
+                       FORK-LICENSE.md UPSTREAM.md UPSTREAM.sha256 \
+                       FORK-NOTES.md CHANGELOG.md README.md; do
+            test -f "zig-out/share/licenses/freetype/$record"
+          done
+          # The licence texts are the real ones, not placeholders.
+          grep -q 'The FreeType Project LICENSE' zig-out/share/licenses/freetype/FTL.TXT
+          grep -q 'GNU GENERAL PUBLIC LICENSE' zig-out/share/licenses/freetype/GPLv2.TXT
+          grep -q 'mutually exclusive' zig-out/share/licenses/freetype/LICENSE.TXT
+          grep -q 'SIL OPEN FONT LICENSE' zig-out/share/licenses/freetype/COPYING
+          # The FTL's credit clause, discharged in the installed record.
+          grep -q 'David Turner, Robert Wilhelm, and Werner Lemberg' \
+            zig-out/share/licenses/freetype/README
+
+      # The pkg-config file has to be usable, and its relocatable prefix is the
+      # whole reason it is written with ${pcfiledir} rather than a substituted
+      # path: it is read here from the installed location, which is not where the
+      # build ran.
+      - name: pkg-config answers for the static install
+        run: |
+          set -euo pipefail
+          export PKG_CONFIG_PATH="$PWD/zig-out/lib/pkgconfig"
+          pkg-config --exists freetype2
+          pkg-config --libs freetype2 | grep -q -- '-lfreetype'
+          pkg-config --cflags freetype2 | grep -q -- '-I'
+          grep -q '^Version: 2\.14\.3$' zig-out/lib/pkgconfig/freetype2.pc
+          # The include root is freetype2, which is where upstream installs
+          # these headers.
+          grep -q 'freetype2' zig-out/lib/pkgconfig/freetype2.pc
+          # The C math library is FreeType's own link dependency on a Unix
+          # target, and nothing is invented next to it: no zlib, no libpng, no
+          # HarfBuzz, because this configuration leaves all of them off.
+          grep -q -- '-lm' zig-out/lib/pkgconfig/freetype2.pc
+          ! grep -q -- '-lz' zig-out/lib/pkgconfig/freetype2.pc
+          ! grep -q -- '-lpng' zig-out/lib/pkgconfig/freetype2.pc
+          ! grep -q -- '-lharfbuzz' zig-out/lib/pkgconfig/freetype2.pc
+
+      # The proof that the installed tree serves a C consumer: compiled against
+      # the installed headers, linked against the installed archive, and reading
+      # the fixture this repository carries.
+      - name: installed C headers compile, link and run against the archive
+        run: |
+          set -euo pipefail
+          zig cc -std=gnu99 \
+            $(PKG_CONFIG_PATH="$PWD/zig-out/lib/pkgconfig" pkg-config --cflags freetype2) \
+            "$RUNNER_TEMP/c_gate.c" \
+            zig-out/lib/libfreetype.a \
+            -lm \
+            -o "$RUNNER_TEMP/c_gate_static"
+          "$RUNNER_TEMP/c_gate_static" "$PWD/tests/fixtures/HarfBust.ttf"
+
+      - name: test (static, Debug)
+        run: zig build test
+
+      - name: test (static, ReleaseSafe)
+        run: zig build test -Doptimize=ReleaseSafe
+
+      - name: smoke (static)
+        run: zig build smoke
+
+      # --------------------------------------------------------------- dynamic
+
+      # Back to a clean tree so the shared install cannot be confused with the
+      # static one still in `zig-out/`.
+      - name: build (shared object)
+        run: |
+          set -euo pipefail
+          rm -rf zig-out
+          zig build --summary all -Dlinkage=dynamic
+
+      # Four questions nothing else here asks: is the file a shared object at
+      # all, does it carry the ABI name upstream states, is its export surface
+      # exactly the header-declared API, and does an installed C consumer load
+      # it.
+      - name: shared install is a loadable object with upstream's SONAME
+        run: |
+          set -euo pipefail
+          so=zig-out/lib/libfreetype.so.6.26.20
+          test -f "$so"
+          test -L zig-out/lib/libfreetype.so.6
+          test -L zig-out/lib/libfreetype.so
+          test ! -e zig-out/lib/libfreetype.a
+          test -f zig-out/lib/pkgconfig/freetype2.pc
+          test -f zig-out/include/freetype2/freetype/freetype.h
+          # `builds/unix/configure.raw:20` gives version_info='26:6:20', so the
+          # SONAME component is current - age = 6 and a loader is given
+          # libfreetype.so.6. The versioned file name is Zig's own, not
+          # libtool's; README.md says so.
+          readelf -d "$so" | grep -q 'SONAME.*\[libfreetype\.so\.6\]'
+          PKG_CONFIG_PATH="$PWD/zig-out/lib/pkgconfig" pkg-config --exists freetype2
+
+      # The export surface, checked against the version script build.zig writes
+      # for ELF targets: `global: FT_*; local: *;`. So every defined dynamic
+      # symbol has to start with FT_, and an internal symbol that leaked out
+      # would break this before it broke an installed C consumer. A spot list of
+      # header-declared entry points has to be present, because "only FT_*" would
+      # also be satisfied by an object that exported almost nothing.
+      - name: the dynamic export surface is exactly FT_*
+        run: |
+          set -euo pipefail
+          so=zig-out/lib/libfreetype.so.6.26.20
+          nm -D --defined-only "$so" | awk '$2 == "T" || $2 == "D" || $2 == "B" { print $3 }' \
+            | LC_ALL=C sort -u > "$RUNNER_TEMP/exported.txt"
+          test -s "$RUNNER_TEMP/exported.txt"
+          if grep -qv '^FT_' "$RUNNER_TEMP/exported.txt"; then
+            echo "the shared object exports a name that is not FT_*:" >&2
+            grep -v '^FT_' "$RUNNER_TEMP/exported.txt" >&2
+            exit 1
+          fi
+          for entry in FT_Init_FreeType FT_Done_FreeType FT_New_Face \
+                        FT_New_Memory_Face FT_Done_Face FT_Set_Char_Size \
+                        FT_Set_Pixel_Sizes FT_Load_Char FT_Load_Glyph \
+                        FT_Render_Glyph FT_Get_Char_Index FT_Get_Advance \
+                        FT_Get_Advances FT_Get_Glyph_Name FT_Outline_Get_CBox \
+                        FT_Outline_Get_BBox FT_Outline_Decompose \
+                        FT_Library_Version FT_Done_MM_Var; do
+            grep -qx "$entry" "$RUNNER_TEMP/exported.txt" ||
+              { echo "$entry is declared in the headers but not exported" >&2; exit 1; }
+          done
+          # The internals are the other half of the same claim, named explicitly
+          # so a regression is legible rather than a diff line.
+          for internal in ft_mem_alloc ft_mem_realloc ft_mem_free \
+                          ft_outline_new ft_glyphslot_grid_fit_metrics \
+                          tt_face_load_head sfnt_load_face \
+                          truetype_module_class; do
+            ! grep -qx "$internal" "$RUNNER_TEMP/exported.txt" ||
+              { echo "$internal leaked into the export surface" >&2; exit 1; }
+          done
+
+      # The same C program as the static gate above, reaching the shared object
+      # through the installed pkg-config metadata rather than by path, so the
+      # `.pc` file is exercised as well as present and the two deliveries are
+      # compared on identical ground.
+      - name: installed C headers load the shared object through pkg-config and run
+        run: |
+          set -euo pipefail
+          export PKG_CONFIG_PATH="$PWD/zig-out/lib/pkgconfig"
+          zig cc -std=gnu99 \
+            $(pkg-config --cflags freetype2) \
+            "$RUNNER_TEMP/c_gate.c" \
+            $(pkg-config --libs freetype2) \
+            -Wl,-rpath,"$PWD/zig-out/lib" \
+            -o "$RUNNER_TEMP/c_gate_shared"
+          "$RUNNER_TEMP/c_gate_shared" "$PWD/tests/fixtures/HarfBust.ttf"
+
+      - name: test (shared object, Debug)
+        run: zig build test -Dlinkage=dynamic
+
+      - name: test (shared object, ReleaseSafe)
+        run: zig build test -Dlinkage=dynamic -Doptimize=ReleaseSafe
+
+      - name: smoke (shared object)
+        run: zig build smoke -Dlinkage=dynamic
+
+  runtime:
+    name: runtime-loaded dispatch against a named provider
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      # The provider is this build's own shared object, delivered to a prefix of
+      # its own. Nothing is downloaded, and no installed system libfreetype is
+      # involved: the point of the job is that the loader can take a path this
+      # build produced.
+      - name: build the provider
+        run: |
+          set -euo pipefail
+          zig build -Dlinkage=dynamic --prefix "$RUNNER_TEMP/provider"
+          test -f "$RUNNER_TEMP/provider/lib/libfreetype.so.6"
+
+      # The tests and the example again, with every FT_* entry point resolved
+      # through the platform loader instead of the linker. There is no default
+      # provider and no fallback, so the variable is the whole configuration.
+      - name: test (runtime-loaded, Debug)
+        run: |
+          set -euo pipefail
+          FREETYPE_TEST_PROVIDER="$RUNNER_TEMP/provider/lib/libfreetype.so.6" \
+            zig build test -Druntime=true
+
+      - name: test (runtime-loaded, ReleaseSafe)
+        run: |
+          set -euo pipefail
+          FREETYPE_TEST_PROVIDER="$RUNNER_TEMP/provider/lib/libfreetype.so.6" \
+            zig build test -Druntime=true -Doptimize=ReleaseSafe
+
+      - name: smoke (runtime-loaded)
+        run: |
+          set -euo pipefail
+          FREETYPE_TEST_PROVIDER="$RUNNER_TEMP/provider/lib/libfreetype.so.6" \
+            zig build smoke -Druntime=true
+
+      # The consumer package in the same configuration, with its provider named
+      # on the command line rather than in the environment: both routes are
+      # explicit, and neither falls back to the other.
+      - name: consumer (runtime-loaded)
+        run: |
+          set -euo pipefail
+          cd consumer
+          zig build run -Druntime=true -- --provider "$RUNNER_TEMP/provider/lib/libfreetype.so.6"
+
+  cross:
+    name: cross-target compile matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      # Six separate compile steps, six separate targets, no tolerated failure.
+      # Each one compiles the whole package for that target: the forty-unit C
+      # closure with that target's own platform `ftsystem.c`, the translated
+      # headers, the facade, the tests and the example. Nothing is run, so a
+      # green step is compile evidence and not a claim that a foreign binary
+      # executed.
+      #
+      # What walks is worth stating: `builds/unix/ftsystem.c` for the four Unix
+      # targets, `builds/windows/ftsystem.c` for the Windows one, and upstream's
+      # stdio-only `src/base/ftsystem.c` for wasm32-wasi, which is the branch
+      # that has no `unistd.h`, `fcntl.h` or `sys/mman.h` to reach for.
+      - name: check x86_64-linux-gnu
+        run: zig build check -Dtarget=x86_64-linux-gnu --summary all
+
+      - name: check aarch64-linux-gnu
+        run: zig build check -Dtarget=aarch64-linux-gnu --summary all
+
+      - name: check aarch64-macos-none
+        run: zig build check -Dtarget=aarch64-macos-none --summary all
+
+      - name: check x86_64-windows-gnu
+        run: zig build check -Dtarget=x86_64-windows-gnu --summary all
+
+      - name: check riscv64-linux-gnu
+        run: zig build check -Dtarget=riscv64-linux-gnu --summary all
+
+      - name: check wasm32-wasi
+        run: zig build check -Dtarget=wasm32-wasi --summary all
+
+  # The same six targets again through `-Dlinkage=dynamic`, and for the same
+  # reason the `cross` job exists: a shared object is a new artifact class, not
+  # a linkage flip, so "the static graph compiles for this target" says nothing
+  # about whether the shared one does. Six separate compile steps, no matrix
+  # row, no tolerated failure.
+  cross-shared:
+    name: cross-target compile matrix, shared artifact
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: check x86_64-linux-gnu
+        run: zig build check -Dlinkage=dynamic -Dtarget=x86_64-linux-gnu --summary all
+
+      - name: check aarch64-linux-gnu
+        run: zig build check -Dlinkage=dynamic -Dtarget=aarch64-linux-gnu --summary all
+
+      - name: check aarch64-macos-none
+        run: zig build check -Dlinkage=dynamic -Dtarget=aarch64-macos-none --summary all
+
+      - name: check x86_64-windows-gnu
+        run: zig build check -Dlinkage=dynamic -Dtarget=x86_64-windows-gnu --summary all
+
+      - name: check riscv64-linux-gnu
+        run: zig build check -Dlinkage=dynamic -Dtarget=riscv64-linux-gnu --summary all
+
+      - name: check wasm32-wasi
+        run: zig build check -Dlinkage=dynamic -Dtarget=wasm32-wasi --summary all
+
+  consumer:
+    name: consumer package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      # The failure this catches is the one the library's own tests cannot see:
+      # a module that builds from the inside and does not resolve from outside.
+      # All three configurations, because the consumer reaches the library
+      # through the module and the module carries whichever artifact and
+      # dispatch `-Dlinkage` and `-Druntime` selected.
+      - name: run (linked, static)
+        working-directory: consumer
+        run: zig build run
+
+      - name: run (linked, shared)
+        working-directory: consumer
+        run: zig build run -Dlinkage=dynamic
+
+      - name: run (runtime-loaded, provider from the environment)
+        run: |
+          set -euo pipefail
+          zig build -Dlinkage=dynamic --prefix "$RUNNER_TEMP/provider"
+          cd consumer
+          FREETYPE_TEST_PROVIDER="$RUNNER_TEMP/provider/lib/libfreetype.so.6" \
+            zig build run -Druntime=true
