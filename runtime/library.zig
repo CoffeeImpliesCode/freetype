@@ -81,11 +81,9 @@ pub fn Config(comptime dispatch: type) type {
             // Check the out handle separately from `FT_Init_FreeType`'s status.
             // Pass every non-null handle to `FT_Done_FreeType`.
             var handle: ?*anyopaque = null;
-            if (dst.FT_Init_FreeType(&handle) != 0) return
-                "FT_Init_FreeType reported an error, so this provider could " ++
+            if (dst.FT_Init_FreeType(&handle) != 0) return "FT_Init_FreeType reported an error, so this provider could " ++
                 "not allocate a library and cannot serve one";
-            if (handle == null) return
-                "FT_Init_FreeType reported success and left a null library, " ++
+            if (handle == null) return "FT_Init_FreeType reported success and left a null library, " ++
                 "so this provider does not do what its own header says it does";
             // A live handle must be destroyed on every return path.
             defer _ = dst.FT_Done_FreeType(handle);

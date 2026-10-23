@@ -93,8 +93,7 @@ pub fn main() !void {
     {
         const size = face.handle().size orelse return error.MetricsCheckFailed;
         const rec: *ft.c.FT_SizeRec = @ptrCast(size);
-        std.debug.print("  zero pixel size becomes      {d}x{d} ppem\n", .{
-            rec.metrics.x_ppem, rec.metrics.y_ppem });
+        std.debug.print("  zero pixel size becomes      {d}x{d} ppem\n", .{ rec.metrics.x_ppem, rec.metrics.y_ppem });
         if (rec.metrics.x_ppem != 1 or rec.metrics.y_ppem != 1) {
             return error.MetricsCheckFailed;
         }

@@ -29,8 +29,8 @@ The imported FreeType tree is unmodified; the fork adds these sources:
 - The consumer step launches Zig 0.17 with `--build-file`, forwards `ZIG_GLOBAL_CACHE_DIR` and `ZIG_LIB_DIR`, and uses a separate local cache.
 - Cross-target consumer steps build and install without running; native consumer steps run the program.
 
-## Platform boundaries
+## Platform boundaries (observed with Zig 0.16; not rechecked on 0.17)
 
-- `wasm32-wasi` cannot compile FreeType with Zig 0.16.0's wasi-libc: `ftstdlib.h` includes `setjmp.h`, which requires WebAssembly exception handling.
-- Zig 0.16.0 `translate-c` fails on NetBSD headers that expand `_Pragma`, 32-bit OpenBSD's `size_t` typedef, MIPS BSD endianness macros, and 32-bit Windows' missing `_ALLOCA_S_MARKER_SIZE`; these failures reproduce without FreeType source.
+- `wasm32-wasi` cannot compile FreeType with wasi-libc: `ftstdlib.h` includes `setjmp.h`, which requires WebAssembly exception handling.
+- `translate-c` fails on NetBSD headers that expand `_Pragma`, 32-bit OpenBSD's `size_t` typedef, MIPS BSD endianness macros, and 32-bit Windows' missing `_ALLOCA_S_MARKER_SIZE`; these failures reproduce without FreeType source.
 - Runtime loading requires a platform dynamic loader and a provider that reports FreeType 2.14.3, matching the package headers.

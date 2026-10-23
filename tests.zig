@@ -111,19 +111,19 @@ const Font = struct {
             const offset = std.mem.readInt(u32, bytes[record + 8 ..][0..4], .big);
             const length = std.mem.readInt(u32, bytes[record + 12 ..][0..4], .big);
             const table: Table = .{ .offset = offset, .length = length };
-            if (std.mem.eql(u8, bytes[record ..][0..4], "head")) {
+            if (std.mem.eql(u8, bytes[record..][0..4], "head")) {
                 head = table;
-            } else if (std.mem.eql(u8, bytes[record ..][0..4], "maxp")) {
+            } else if (std.mem.eql(u8, bytes[record..][0..4], "maxp")) {
                 maxp = table;
-            } else if (std.mem.eql(u8, bytes[record ..][0..4], "hhea")) {
+            } else if (std.mem.eql(u8, bytes[record..][0..4], "hhea")) {
                 hhea = table;
-            } else if (std.mem.eql(u8, bytes[record ..][0..4], "hmtx")) {
+            } else if (std.mem.eql(u8, bytes[record..][0..4], "hmtx")) {
                 hmtx = table;
-            } else if (std.mem.eql(u8, bytes[record ..][0..4], "cmap")) {
+            } else if (std.mem.eql(u8, bytes[record..][0..4], "cmap")) {
                 cmap = table;
-            } else if (std.mem.eql(u8, bytes[record ..][0..4], "loca")) {
+            } else if (std.mem.eql(u8, bytes[record..][0..4], "loca")) {
                 loca = table;
-            } else if (std.mem.eql(u8, bytes[record ..][0..4], "glyf")) {
+            } else if (std.mem.eql(u8, bytes[record..][0..4], "glyf")) {
                 glyf = table;
             }
         }
@@ -354,8 +354,8 @@ test "an outline has the contours the glyf table says it has" {
     const font = try decodeFixture();
 
     // These glyphs have non-empty `loca` ranges.
- 
-        // Every closed contour contains at least one point.
+
+    // Every closed contour contains at least one point.
     for ([_]u16{ 10, 28, 53 }) |gid| {
         _ = try font.glyphBox(gid);
         const glyph = try fixture.face.loadGlyph(gid, ft.no_scale_no_hinting);

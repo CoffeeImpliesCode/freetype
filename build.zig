@@ -196,8 +196,17 @@ const Platform = struct {
                 .dll = true,
             },
             // The mmap implementation needs these headers (`meson.build:225-244`).
-            .linux, .macos, .ios, .tvos, .watchos, .visionos, .freebsd, .netbsd,
-            .openbsd, .dragonfly, .illumos,
+            .linux,
+            .macos,
+            .ios,
+            .tvos,
+            .watchos,
+            .visionos,
+            .freebsd,
+            .netbsd,
+            .openbsd,
+            .dragonfly,
+            .illumos,
             => .{
                 .system_source = "builds/unix/ftsystem.c",
                 // Define headers expected by `builds/unix/ftsystem.c:29-64`.
