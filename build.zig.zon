@@ -1,66 +1,21 @@
 // SPDX-License-Identifier: MIT
 .{
-    // The package id, the name a dependent writes in its dependency map, the one
-    // registered module (`dep.module("freetype")`) and the artifact
-    // (`dep.artifact("freetype")`) are all `freetype`, and that is what makes
-    // Zig emit `libfreetype.a` - the name a C consumer's `-lfreetype` needs,
-    // and the one upstream's own `freetype2.pc` writes.
+    // Package, module, and artifact name.
     .name = .freetype,
     .fingerprint = 0xac2059b6dfa9d2f2,
-    // Upstream's own release, read out of `include/freetype/freetype.h:5170-5172`
-    // (`FREETYPE_MAJOR 2`, `FREETYPE_MINOR 14`, `FREETYPE_PATCH 3`). This is the
-    // version of the C library this package builds, not a version of the
-    // wrapper. `build.zig` compares it against the same three macros read out of
-    // that header and refuses to configure when the two disagree, so this
-    // string and the vendored source cannot describe two different releases.
+    // Upstream release, checked against the vendored headers by build.zig.
     .version = "2.14.3",
-    // `.fingerprint` is deliberately absent.
-    //
-    // Zig 0.16.0's manifest reader requires the field and derives its value from
-    // the package name alone; the compiler prints the correct value when the
-    // field is missing ("missing top-level 'fingerprint' field; suggested value:
-    // 0x..."). That derivation lives in the compiler, not in the pinned
-    // `lib/std`, and reproducing it by hand would be writing a fabricated
-    // identifier into a field whose whole purpose is to *not* be guessable.
-    // Running the toolchain to obtain it belongs to the driver, so the field is
-    // left missing and named as a prerequisite in FORK-NOTES.md rather than
-    // filled with a number nobody read out of anything.
     .minimum_zig_version = "0.16.0",
-    // Nothing is fetched: the C library is this repository's own source, and the
-    // facade, tests, example, consumer and runtime table import only what is
-    // compiled here. FreeType's own release is the tarball already unpacked into
-    // `include/`, `src/` and `builds/`.
+    // No external Zig dependencies.
     .dependencies = .{},
     .paths = .{
         "build.zig",
         "build.zig.zon",
-        // The cross-test harness profile for this package: settings only, no
-        // host path and no target subset. Nothing in build.zig reads it.
+        // cross-test settings profile.
         "cross-test.profile.sh",
-        // zig/root.zig is the typed facade and zig/translate.h the aggregate
-        // translation header. Both travel because a dependent reaches them
-        // through `dep.module("freetype")`.
+        // Facade and runtime imports used by dependent modules.
         "zig",
-        // Upstream's FreeType, unmodified: `include/` (the 43-header public
-        // surface including `ft2build.h`), `src/` in full - every module's unity
-        // unit, every base extension, all three `ftsystem.c` variants' directory,
-        // the bundled zlib-derived inflate, and the files upstream does not
-        // compile in this configuration - `builds/` (which holds the two
-        // platform `ftsystem.c` units this build selects between and every other
-        // build system upstream ships, none of which is executed), `docs/` (the
-        // two licence texts, the release notes and the manuals), `tests/`, and
-        // the top-level files that describe the release: `modules.cfg`,
-        // `LICENSE.TXT`, `README`, `ChangeLog`, `CMakeLists.txt`, `Makefile`,
-        // `meson.build`, `meson_options.txt`, `configure`, `autogen.sh`,
-        // `vms_make.com`, `MSBuild.rsp`, `MSBuild.sln`, `.clang-format`,
-        // `README.git`.
-        //
-        // The whole directories travel rather than a hand-picked file list so
-        // that the tree a dependent receives is upstream's tree: nothing here is
-        // edited, re-entered or regenerated, and a build that needed a file
-        // outside this closure would have to edit upstream to get it. What was
-        // *not* taken, and why, is in UPSTREAM.md; `objs/` is the only exclusion
-        // and it is an empty build-output directory in the tarball.
+        // Upstream source, headers, tests, manuals, and build files.
         "include",
         "src",
         "builds",
@@ -83,37 +38,21 @@
         ".clang-format",
         "tests.zig",
         "smoke.zig",
-        // The separate consumer package: proof that the published module
-        // resolves from a package that did not write it, through a relative path
-        // rather than a fetch.
+        // Standalone consumer package.
         "consumer/build.zig",
         "consumer/build.zig.zon",
         "consumer/src/main.zig",
-        // The provenance script that checks the recorded digests and the exact
-        // upstream file set.
+        // Source-provenance checker.
         "tools",
-        // The runtime loader core the API role owns, and this library's generated
-        // dispatch and descriptor beside it. It is a dependency of the published
-        // module under `-Druntime`, so a dependent that takes this package must
-        // receive it; `runtime/graph.zig` is the one place `createModule`
-        // substitutes for `translate.createModule()`.
+        // Runtime loader and generated dispatch.
         "runtime",
-        // Standalone Nix packaging and the canonical development shell.
-        // `package.nix` is the one source-only derivation and builds the `.static`
-        // and `.dynamic` variants of this same tree; `flake.nix` exposes them;
-        // `devenv.nix`, `devenv.yaml` and `.envrc` provide the shell. The lock
-        // files belong to the driver and are absent from this list until they
-        // exist: naming a path that is not there would make `zig fetch` hash a
-        // missing entry.
+        // Nix derivation, flake, and development-shell files.
         "package.nix",
         "flake.nix",
         "devenv.nix",
         "devenv.yaml",
         ".envrc",
-        // .zig-cache/, zig-out/, zig-pkg/, consumer/.zig-cache/ and the Nix and
-        // devenv working-tree artefacts are deliberately absent: build outputs, a
-        // fetched package tree, a `result` symlink and shell state are not part of
-        // a package. See .gitignore.
+        // Exclude build outputs and local state.
         "UPSTREAM.md",
         "UPSTREAM.sha256",
         "README.md",

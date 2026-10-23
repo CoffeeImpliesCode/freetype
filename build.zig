@@ -1,201 +1,38 @@
 // SPDX-License-Identifier: MIT
 // See FORK-LICENSE.md for what that identifier covers.
-//
-//! Zig 0.16 build for FreeType 2.14.3.
-//!
-//! The library is upstream's own C, byte for byte: two base units, one file per
-//! registered module in `include/freetype/config/ftmodule.h`, the sixteen base
-//! extensions `modules.cfg` lists, the two units that depend on the platform,
-//! and `src/base/ftdebug.c`. Nothing is downloaded, no make, no CMake, no meson
-//! and no autotools script is executed, and the default mode compiles
-//! everything from this repository rather than linking an installed copy.
-//!
-//! ## Why the module list is one file per module
-//!
-//! FreeType's drivers and modules are *unity* units. `src/truetype/truetype.c`
-//! is nineteen lines of `#include`s and nothing else; `src/sfnt/sfnt.c` pulls in
-//! eighteen more files; `src/gzip/ftgzip.c` pulls in zlib's own `inflate.c`,
-//! `inffast.c`, `inftrees.c`, `zutil.c`, `adler32.c` and `crc32.c`, which is how
-//! FreeType 2.14 carries a decompressor without linking a system zlib. The unit
-//! list below is therefore short *because* upstream organised it that way, and
-//! compiling the individual files as separate translation units would be a
-//! second, different build of upstream's code rather than this one.
-//!
-//! The list is `meson.build:82-135`'s derivation from `modules.cfg`, with one
-//! deliberate omission: `modules.cfg` lists `AUX_MODULES += cache`, but the
-//! module list FreeType actually ships — the one `FT_CONFIG_MODULES_H` resolves
-//! to at `include/freetype/config/ftheader.h:162-163` — does not register
-//! `ftcache_module_class`. This build follows the shipped list rather than
-//! `modules.cfg`, because the shipped list is what decides which modules a
-//! `FT_Library` can load at run time. `src/cache/` therefore travels in the
-//! package and is not compiled; `tests.zig` names that as a boundary rather than
-//! pretending the subpixel cache is there.
-//!
-//! ## Entry points
-//!
-//!   zig build           install the library, the 47 public headers under
-//!                       `include/freetype2/`, the relocatable `freetype2.pc`,
-//!                       and the licence and provenance records
-//!   zig build test      run the behavioural tests for the selected target
-//!                       (`-Dtarget`; the host when it is absent)
-//!   zig build smoke     run the example program
-//!   zig build consumer  build the separate `consumer/` package, and run it when
-//!                       this host can execute the selected target
-//!   zig build check     compile the native library, the facade, the tests and
-//!                       the example for each of the six check targets, running
-//!                       nothing
-//!
-//!   cross-test       the same `test` step, for the published 53-platform Zig
-//!                   0.16.0 Tier 1/2 table rather than the host alone.
-//!                   `cross-test` discovers `cross-test.profile.sh` from the
-//!                   package root and runs `zig build test -Dtarget=TARGET` for
-//!                   each of them, executing where a runner exists and recording
-//!                   explicit `build_only` coverage where one does not.
-//!
-//! ## Options
-//!
-//!   -Dlinkage=static   a static archive, `libfreetype.a`. The default.
-//!   -Dlinkage=dynamic  a real shared object. Upstream ships no prebuilt ELF
-//!                      shared object; this graph builds one, with the SONAME
-//!                      libtool derives from `builds/unix/configure.raw:20` and
-//!                      an export surface of exactly the header-declared API.
-//!   -Druntime=true     resolve the native entry points at run time instead of
-//!                      linking them. Orthogonal to `-Dlinkage`. Default off; a
-//!                      linked build is unchanged.
-//!   -Dsystem=true      link an installed `libfreetype` instead of compiling
-//!                      `src/`. Supplies the default of
-//!                      `b.systemIntegrationOption("freetype", ...)`; a build
-//!                      runner that decides the mode itself (`-fsys=freetype`)
-//!                      overrides it.
-//!   -Dtarget=<triple>  build for one target; `zig build check` then checks that
-//!                      target only instead of the whole matrix.
-//!   -Doptimize=<mode>  the caller's mode, passed to every graph below.
-//!
-//! ## Per-target platform configuration
-//!
-//! FreeType picks one of three `ftsystem.c` files and the choice is a property
-//! of the *target*, never of the machine running the build. `Platform.systemSource`
-//! is the one place that mapping exists; the library, the translation and the
-//! configure-time print all read it.
-//!
-//!   * `builds/unix/ftsystem.c` for the targets whose libc has `unistd.h`,
-//!     `fcntl.h` and `sys/mman.h`, which is what that file is for: it maps a
-//!     font file into memory instead of reading it (`builds/unix/ftsystem.c:30-64`
-//!     is the include block). Linux, the BSDs, Solaris and Darwin qualify.
-//!   * `builds/windows/ftsystem.c` for `windows`, which uses `CreateFileMapping`
-//!     and `MapViewOfFile` (`builds/windows/ftsystem.c:30`).
-//!   * `src/base/ftsystem.c` for everything else, which is the stdio-only
-//!     implementation and reaches nothing beyond `freetype/config/ftstdlib.h`.
-//!     `wasm32-wasi` takes this branch: WASI preview 1 has no `sys/mman.h`, and
-//!     a wrapper that compiled the mmap unit for it would fail to compile rather
-//!     than degrade.
-//!
-//! Every one of the three is upstream's own file, from the release tarball, and
-//! `meson.build:225-244` is upstream making the same three-way choice.
-//!
-//! ## What is *not* defined, and why that is a result rather than a gap
-//!
-//!   * `FT_CONFIG_OPTION_SYSTEM_ZLIB` is left undefined, exactly as
-//!     `include/freetype/config/ftoption.h:227` ships it. The effect is that
-//!     `src/gzip/ftgzip.c:47-114` compiles FreeType's own modified inflate
-//!     rather than including `<zlib.h>`. This package therefore needs no system
-//!     zlib, links none, and exports none — and `src/gzip/README.freetype` and
-//!     `src/gzip/patches/freetype-zlib.diff` are what make that bundle
-//!     auditable.
-//!   * `FT_CONFIG_OPTION_USE_HARFBUZZ` is left undefined, so the auto hinter
-//!     does not link a text-shaping library. The sibling `harfbuzz/` package is
-//!     the direction that dependency points, and nothing here depends on it.
-//!   * `FT_CONFIG_OPTION_USE_BROTLI`, `FT_CONFIG_OPTION_USE_PNG` and
-//!     `FT_CONFIG_OPTION_USE_BZIP2` are undefined, so `src/sfnt/sfwoff2.c`,
-//!     `src/sfnt/pngshim.c` and `src/bzip2/` contribute nothing. All three
-//!     files are still compiled as part of their unity unit and are internally
-//!     guarded (`src/sfnt/pngshim.c:28-31`, `src/sfnt/sfwoff2.c:27-29`), so
-//!     "contributes nothing" is a fact about the code rather than a file this
-//!     graph left out.
-//!   * `FT_CONFIG_OPTION_SUBPIXEL_RENDERING` is undefined, which is what keeps
-//!     `src/cache/` uncompiled.
-//!
-//! ## No upstream test suite is carried, and no step pretends otherwise
-//!
-//! The release tarball's `tests/` directory builds exactly one test program,
-//! for one reported issue: `tests/meson.build:1-4` makes `issue-1063` from
-//! `issue-1063/main.c`, and `tests/meson.build:9-12` registers it as the only
-//! `test()` target in that directory, in the `regression` suite, with
-//! `FREETYPE_TESTS_DATA_DIR` set to `tests/data/` (`tests/meson.build:6-7`).
-//! That is a regression check for one issue and not an executable conformance
-//! suite; the font it opens (`tests/issue-1063/main.c:24-26`) is not in this
-//! tree, and `tests/README.md:7-8` reaches it with a download script
-//! (`tests/scripts/download-test-fonts.py`). This graph therefore has no
-//! `upstream-test` step and never fetches one to fill the gap.
-//!
-//! ## Where the fixtures come from
-//!
-//! `tests/fixtures/HarfBust.ttf` is HarfBuzz's own Latin test font, vendored
-//! from `harfbuzz/test/shape/data/in-house/fonts/` under the SIL Open Font
-//! License 1.1 whose text is beside it as `tests/fixtures/COPYING`. Its digests
-//! and provenance are in `UPSTREAM.md`, and `tests.zig` decodes the font's own
-//! `head`, `maxp`, `hhea`, `hmtx`, `cmap`, `loca` and `glyf` tables in Zig so
-//! that every number this package asserts against FreeType is an independent
-//! read of the binary rather than an agreement with itself.
 
 const std = @import("std");
 const manifest = @import("build.zig.zon");
 const graph = @import("runtime/graph.zig");
 
-/// The manifest's version, parsed once and compared against the vendored
-/// headers at configure time.
+/// Package version; compared against the vendored headers.
 const manifest_version = std.SemanticVersion.parse(manifest.version) catch
     @panic("build.zig.zon .version is not a semantic version");
 
-/// The package id, the module name, the artifact name and the library's own
-/// base name. All four are `freetype`, and that is what makes Zig emit
-/// `libfreetype.a`, which is what a C consumer's `-lfreetype` needs and what
-/// upstream's own `Makefile` and `freetype2.pc` name.
+/// Name shared by the dependency, module, and native artifact.
 const lib_name = "freetype";
-/// The typed facade: the one registered module, `dep.module("freetype")`.
 const facade_source = "zig/root.zig";
-/// The aggregate translation header.
 const translate_header = "zig/translate.h";
 const test_source = "tests.zig";
 const example_source = "smoke.zig";
 
-/// The native source root, and the include path the C library itself uses.
 const source_dir = "src";
-/// Upstream's include root: `include/ft2build.h` and `include/freetype/**`.
 const include_dir = "include";
 
-/// The FreeType release these sources are, read out of
-/// `include/freetype/freetype.h:5170-5172`.
+/// Release read from `include/freetype/freetype.h:5170-5172`.
 const upstream_version: std.SemanticVersion = .{ .major = 2, .minor = 14, .patch = 3 };
 
-/// The SONAME this package delivers for a shared object.
-///
-/// `builds/unix/configure.raw:20` states `version_info='26:6:20'`, which libtool
-/// reads as current 26, revision 6, age 20. The SONAME component is
-/// `current - age` = 6, so upstream's installed object is `libfreetype.so.6`.
-/// Zig derives the SONAME from `version.major` and the file name from all three
-/// components, so minor and patch carry `current` and `age` verbatim and the
-/// delivered file reads `libfreetype.so.6.26.20`. Every number here is read out
-/// of that one line; none is chosen.
+/// Derived from libtool's `version_info='26:6:20'` (`builds/unix/configure.raw:20`).
+/// The SONAME is current minus age; the filename carries the full version.
 const abi_version: std.SemanticVersion = .{ .major = 6, .minor = 26, .patch = 20 };
 
-/// The two base units.
-///
-/// `src/base/ftbase.c:21-38` is the unity unit for the base module — it includes
-/// `ftadvanc.c`, `ftobjs.c`, `ftstream.c` and the rest — and `ftinit.c` is the
-/// one that walks `FT_CONFIG_MODULES_H`.
 const base_sources = [_][]const u8{
     "src/base/ftbase.c",
     "src/base/ftinit.c",
 };
 
-/// One unit per registered module, in the order `include/freetype/config/ftmodule.h`
-/// registers them. `meson.build:82-107` derives this same list from
-/// `modules.cfg`'s font, hinting and raster module sections.
-///
-/// The file name is the module's *main* file, not its driver: `winfonts` is
-/// `src/winfonts/winfnt.c` and `cid` is `src/cid/type1cid.c`, which is
-/// `meson.build:85-90`'s own spelling of the two exceptions.
+/// Compile modules registered by `ftmodule.h`, not every entry in `modules.cfg`.
+/// `ftcache_module_class` is not registered there, so `src/cache/` is not compiled.
 const module_sources = [_][]const u8{
     "src/truetype/truetype.c",
     "src/type1/type1.c",
@@ -219,10 +56,6 @@ const module_sources = [_][]const u8{
     "src/lzw/ftlzw.c",
 };
 
-/// The sixteen base extensions `modules.cfg` lists after its module sections.
-///
-/// They are *not* unity units: `modules.cfg` names them individually and each is
-/// its own translation unit in every upstream build system.
 const base_extensions = [_][]const u8{
     "src/base/ftbbox.c",
     "src/base/ftbdf.c",
@@ -242,20 +75,11 @@ const base_extensions = [_][]const u8{
     "src/base/ftwinfnt.c",
 };
 
-/// `src/base/ftdebug.c`: where `FT_Message` and `FT_Panic` come from.
-///
-/// Not part of the module list and not a base extension: `modules.cfg` ends with
-/// a paragraph about exactly these two units, and `meson.build:247-252` adds
-/// `ftdebug.c` outside the module loop.
+/// FreeType's separate debug unit (`meson.build:247-252`).
 const debug_source = "src/base/ftdebug.c";
 
-/// The 47 headers this package installs, from the two places upstream counts
-/// them: `meson.build:139-186` lists 46 entries in `ft2_public_headers`, which
-/// `meson.build:477-478` installs, and `meson.build:475-476` installs
-/// `include/ft2build.h` separately, as the entry point that is included by
-/// bare name. This package installs all 47 at the same level so that
-/// `-I<includedir>/freetype2` alone satisfies the recipe in
-/// `include/freetype/freetype.h:76-81`.
+/// The 47 public headers, including `ft2build.h` required for bare-name includes
+/// (`include/freetype/freetype.h:76-81`).
 const public_headers = [_][]const u8{
     "include/ft2build.h",
     "include/freetype/freetype.h",
@@ -306,12 +130,10 @@ const public_headers = [_][]const u8{
     "include/freetype/tttags.h",
 };
 
-/// The installed header root. Upstream's own install puts these under
-/// `include/freetype2/`, and `freetype2.pc` is what carries the `-I` for it, so
-/// a `pkg-config --cflags freetype2` is the only thing a C consumer needs.
+/// Match upstream's `include/freetype2/` install path (`meson.build:477-478`).
 const install_include_subdir = "freetype2";
 
-/// The records installed under `share/licenses/freetype/`.
+/// License records installed under `share/licenses/freetype/`.
 const licence_records = [_][]const u8{
     "LICENSE.TXT",
     "docs/FTL.TXT",
@@ -330,23 +152,14 @@ const licence_records = [_][]const u8{
     "README.md",
 };
 
-/// The compile flags every C unit gets.
-///
-/// FreeType's sources are C89 with long-standing GNU-isms, and upstream's own
-/// Unix build passes no `-std` at all, so the least surprising choice is the
-/// compiler's own default dialect. Naming one here would be a fork decision
-/// about upstream's code that no upstream build makes.
+/// Leave the C dialect to the compiler, as upstream's Unix build does.
 const c_flags = [_][]const u8{};
 
-/// Which native library this build links.
 const Library = enum {
-    /// FreeType compiled from this repository's own `src/` and `builds/`.
     bundled,
-    /// An installed `libfreetype`, named by `b.systemIntegrationOption`.
     system,
 };
 
-/// The six cross targets this package compiles for.
 const check_targets = [_]std.Target.Query{
     .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu },
     .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .gnu },
@@ -356,44 +169,22 @@ const check_targets = [_]std.Target.Query{
     .{ .cpu_arch = .wasm32, .os_tag = .wasi },
 };
 
-/// No target is refused, and one of them is known not to compile.
-///
-/// `lua` refuses `wasm32-wasi` because `src/loslib.c` has no arm for
-/// `os.tmpname`. FreeType has no such hole in its own sources - `wasm32-wasi`
-/// reaches `src/base/ftsystem.c`, whose whole dependency set is
-/// `freetype/config/ftstdlib.h`, and every unit in the list above is
-/// self-guarded against the optional features this build leaves off - but it
-/// has a hole one level down. `freetype/config/ftstdlib.h:166` includes
-/// `<setjmp.h>` with no guard and no `FT_CONFIG_OPTION_*` behind it, and the
-/// pinned toolchain's wasi-libc refuses to declare `setjmp` at all:
-/// `libc/include/wasm-wasi-musl/setjmp.h:13` raises `#error` unless
-/// `__wasm_exception_handling__` is defined. Observed 2026-10-05: both halves of
-/// that row fail there.
-///
-/// The row therefore stays in `check_targets` and this list stays empty, so the
-/// failure keeps being reported on every `zig build check` instead of the target
-/// quietly disappearing. Nothing here can make it compile: the fix is the
-/// toolchain's or upstream's, not this build graph's. `FORK-NOTES.md` carries the
-/// full diagnosis, the exact message and what would have to change.
+/// WASI's `include/freetype/config/ftstdlib.h:166` includes `<setjmp.h>`.
+/// wasi-libc requires `__wasm_exception_handling__` (`libc/include/wasm-wasi-musl/setjmp.h:13`).
+/// Keep the target in the check matrix; do not filter this toolchain boundary.
 const refused_check_targets = [_]std.Target.Query{};
 
-/// One cell's graph: the artifacts and the module it hands to dependees.
 const Graph = struct {
     c_lib: ?*std.Build.Step.Compile,
     module: *std.Build.Module,
     platform: Platform,
 };
 
-/// The one place the target's platform facts live.
 const Platform = struct {
-    /// Which `ftsystem.c` this target compiles.
     system_source: []const u8,
-    /// The compile-line macros, as name/value pairs.
     macros: []const [2][]const u8,
-    /// Whether the maths FreeType uses lives in a separate library.
     separate_m: bool,
-    /// Whether `__declspec` exists, i.e. a shared build needs import/export
-    /// decoration.
+    /// Whether shared mode needs Windows import/export decoration.
     dll: bool,
 
     fn forTarget(target: std.Build.ResolvedTarget) Platform {
@@ -404,20 +195,12 @@ const Platform = struct {
                 .separate_m = false,
                 .dll = true,
             },
-            // `builds/unix/ftsystem.c` opens `<unistd.h>`, `<fcntl.h>` and
-            // `<sys/mman.h>`. Those are present for every OS below and for
-            // nothing else this package is built for, which is what
-            // `meson.build:225-244` tests for with `cc.has_header`.
+            // The mmap implementation needs these headers (`meson.build:225-244`).
             .linux, .macos, .ios, .tvos, .watchos, .visionos, .freebsd, .netbsd,
             .openbsd, .dragonfly, .illumos,
             => .{
                 .system_source = "builds/unix/ftsystem.c",
-                // `builds/unix/ftsystem.c` gates `<unistd.h>` on
-                // `HAVE_UNISTD_H` (`:29`) and `<fcntl.h>` on `HAVE_FCNTL_H`
-                // (`:63`), and uses `open`, `read` and `close` from them.
-                // Without these two the unit compiles to undeclared-function
-                // errors, which is what upstream's own `cc.has_header` checks
-                // exist to prevent.
+                // Define headers expected by `builds/unix/ftsystem.c:29-64`.
                 .macros = &.{
                     .{ "HAVE_UNISTD_H", "1" },
                     .{ "HAVE_FCNTL_H", "1" },
@@ -425,8 +208,6 @@ const Platform = struct {
                 .separate_m = true,
                 .dll = false,
             },
-            // Everything else, `wasm32-wasi` included, gets the stdio-only
-            // implementation.
             else => .{
                 .system_source = "src/base/ftsystem.c",
                 .macros = &.{},
@@ -447,40 +228,14 @@ const Platform = struct {
     }
 };
 
-/// The published artifact's name, or the same name with the target appended for
-/// a private matrix cell so that `--summary all` stays readable across six.
 fn artifactName(b: *std.Build, target: std.Build.ResolvedTarget, public: bool) []const u8 {
     if (public) return lib_name;
     const triple = target.result.zigTriple(b.allocator) catch @panic("unspellable target");
     return b.fmt("{s}-{s}", .{ lib_name, triple });
 }
 
-/// The RISC-V float-ABI macro the C compiler predefines and `translate-c` does
-/// not, as the `-D` pair `defineCMacro` takes, or null on every other
-/// architecture.
-///
-/// glibc lays out a RISC-V `jmp_buf` for two of the three RISC-V float ABIs and
-/// refuses the third. In the pinned toolchain's own headers,
-/// `lib/libc/include/riscv-linux-gnu/bits/setjmp.h:32-36` gives the struct
-/// twelve callee-saved `double` registers when `__riscv_float_abi_double` is
-/// defined, gives it none when `__riscv_float_abi_soft` is, and raises `#error
-/// unsupported FLEN` for `__riscv_float_abi_single`, the one ABI left with no
-/// layout there. `<setjmp.h>` reaches this package from
-/// `include/freetype/config/ftstdlib.h:166`, which includes it with no guard
-/// and no `FT_CONFIG_OPTION_*` behind it.
-///
-/// Clang and the translator disagree about that one macro and about nothing
-/// else on this path. `zig cc -target riscv64-linux-gnu` predefines
-/// `__riscv_float_abi_double`, so this package's C library compiles for that
-/// target; `translate-c`, which is Aro, predefines none of the three and stops
-/// on the same header at `bits/setjmp.h:35`. Left alone, the facade would be
-/// translated against a `jmp_buf` layout the library was never compiled with.
-///
-/// So the translation is handed the macro the compile was handed, derived from
-/// the target being built and never from the host (AGENTS.md section 5). A
-/// target with F and no D gets `__riscv_float_abi_single`, which is what clang
-/// gives it and what glibc rejects, so that failure stays a failure instead of
-/// being translated away.
+/// Aro omits Clang's RISC-V float-ABI macro; pass it so translation matches the C build.
+/// glibc's `jmp_buf` depends on that ABI and rejects single-float (`bits/setjmp.h:32-36`).
 fn translateCRiscvFloatAbi(target: std.Build.ResolvedTarget) ?[2][]const u8 {
     switch (target.result.cpu.arch) {
         .riscv32, .riscv32be, .riscv64, .riscv64be => {},
@@ -522,23 +277,11 @@ fn addGraph(
         .optimize = optimize,
         .link_libc = true,
     });
-    // The include path and the translation both need it: `include/ft2build.h`
-    // is included by bare name from three of the four headers
-    // `zig/translate.h` includes, and the translation is what resolves that
-    // name. See AGENTS.md section 5.
+    // Translated headers include `ft2build.h` by bare name.
     if (translate_include) |dir| translate.addIncludePath(dir);
     for (translate_macros) |macro| translate.defineCMacro(macro[0], macro[1]);
-    // `FT2_BUILD_LIBRARY` is what makes `FT_LOCAL` expand to nothing
-    // (`include/freetype/internal/compiler-macros.h`), so the translation
-    // carries the public API and nothing private. It must be on the translation
-    // as well as on every C compile line, or the facade would see a different
-    // declaration of the same header than the library was built with.
+    // Match C visibility: `FT2_BUILD_LIBRARY` controls `FT_LOCAL` (`compiler-macros.h`).
     translate.defineCMacro("FT2_BUILD_LIBRARY", "1");
-    // The one macro the C compiler and the translator disagree about on this
-    // path. It goes on the translation only: clang already predefines it for
-    // every C compile line, and a `-D` there would be a second copy of a fact
-    // the compiler owns. Null off RISC-V, so no other architecture sees a `-D`
-    // it did not need.
     if (translateCRiscvFloatAbi(target)) |macro| translate.defineCMacro(macro[0], macro[1]);
     if (library == .system) {
         translate.linkSystemLibrary(lib_name, .{ .preferred_link_mode = linkage });
@@ -560,10 +303,7 @@ fn addGraph(
         });
 
     if (runtime_loaded) {
-        // The dispatch replaces the translation as the facade's `c` import, and
-        // the archive is built and installed but *not* linked: linking it here
-        // would let the linker satisfy the `FT_*` symbols statically and the
-        // runtime route would silently become a linked one.
+        // Do not link the archive in runtime mode; that would bypass the generated dispatch.
         module.addImport("c", graph.createModule(b, translate, target, optimize));
     } else {
         module.addImport("c", translate.createModule());
@@ -575,7 +315,6 @@ fn addGraph(
     return .{ .c_lib = c_lib, .module = module, .platform = platform };
 }
 
-/// Compile FreeType's own C into one archive.
 fn add_c_library(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
@@ -593,18 +332,14 @@ fn add_c_library(
             .target = target,
             .optimize = optimize,
             .link_libc = true,
-            // A static archive is not asked to be relocatable; a shared object
-            // is, and PIC on every constituent is what makes it work.
+            // Shared objects require position-independent code.
             .pic = if (linkage == .dynamic) true else null,
         }),
     });
     const c_mod = c_lib.root_module;
 
     c_mod.addIncludePath(b.path(include_dir));
-    // `FT_CONFIG_*_H` macros are *macros*, so a C unit has to see them the same
-    // way the translation does. `platform.macros` is currently empty for every
-    // target, and it is read here anyway so that adding one cannot leave the
-    // library and its translation disagreeing.
+    // Keep C and translated header macros aligned.
     for (platform.macros) |macro| c_mod.addCMacro(macro[0], macro[1]);
     c_mod.addCMacro("FT2_BUILD_LIBRARY", "1");
 
@@ -617,8 +352,6 @@ fn add_c_library(
     for (base_extensions) |source| {
         c_mod.addCSourceFile(.{ .file = b.path(source), .flags = &c_flags });
     }
-    // The one unit whose file depends on the target rather than on the module
-    // list, resolved from the resolved target and not probed.
     c_mod.addCSourceFile(.{
         .file = b.path(platform.system_source),
         .flags = &c_flags,
@@ -638,13 +371,8 @@ fn add_c_library(
     return c_lib;
 }
 
-/// An ELF export surface of exactly the header-declared API.
-///
-/// Mach-O and COFF get no version script: a Mach-O object's exported symbols are
-/// decided by the linker's default visibility rules and a COFF object's by its
-/// directives, and a `.def` listing every `FT_*` name would be a second place
-/// that list has to be kept. The fact that the surface is exactly the public API
-/// is therefore only *enforced* on ELF, and `README.md` says which is which.
+/// Restrict ELF exports to the header API; other formats use linker defaults.
+/// Avoid a second maintained list of `FT_*` symbols.
 fn setVersionScript(b: *std.Build, c_lib: *std.Build.Step.Compile, target: std.Build.ResolvedTarget) void {
     if (target.result.ofmt != .elf) return;
     const files = b.addWriteFiles();
@@ -659,13 +387,11 @@ fn setVersionScript(b: *std.Build, c_lib: *std.Build.Step.Compile, target: std.B
     ));
 }
 
-/// Whether the target has a dynamic linker at all.
 fn targetHasDynamicLinker(target: std.Build.ResolvedTarget) bool {
     return target.result.os.tag == .windows or std.Target.DynamicLinker.kind(target.result.os.tag) != .none;
 }
 
-/// The one place linkage is resolved. It never substitutes: a target without a
-/// dynamic linker is a configure-time panic, not a silent static build.
+/// Reject dynamic mode without a dynamic linker; do not substitute static.
 fn deliveredLinkage(target: std.Build.ResolvedTarget, requested: std.builtin.LinkMode) std.builtin.LinkMode {
     if (requested == .dynamic and !targetHasDynamicLinker(target)) {
         std.debug.panic(
@@ -678,7 +404,7 @@ fn deliveredLinkage(target: std.Build.ResolvedTarget, requested: std.builtin.Lin
     return requested;
 }
 
-/// Compile every part of one target's public surface without running it.
+/// Compile one target's surface without running it.
 fn add_target_check(
     b: *std.Build,
     query: std.Target.Query,
@@ -717,8 +443,6 @@ fn add_target_check(
     }).step);
 }
 
-/// Shell out to the separate `consumer/` package, which depends on this one by
-/// a relative path rather than by a fetch.
 fn runConsumer(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
@@ -735,17 +459,13 @@ fn runConsumer(
     const run = b.addSystemCommand(&.{ b.graph.zig_exe, "build" });
     run.setName("consumer package");
     run.setCwd(b.path("consumer"));
-    // A host that cannot execute the selected target gets `install`, which is
-    // compile evidence and never a semantic pass.
     run.addArg(if (hostCanExecute(b, target)) "run" else "install");
     run.addArg(b.fmt("-Dtarget={s}", .{triple}));
     run.addArg(b.fmt("-Dcpu={s}", .{cpu}));
     run.addArg(b.fmt("-Doptimize={s}", .{@tagName(optimize)}));
     run.addArg(b.fmt("-Dlinkage={s}", .{@tagName(linkage)}));
     run.addArg(b.fmt("-Druntime={s}", .{if (runtime_loaded) "true" else "false"}));
-    // The resolved mode travels as `-fsys=`/`-fno-sys=`, because
-    // `systemIntegrationOption` is fed by those flags and a `-Dsystem` in the
-    // nested build would be ignored.
+    // Forward system integration through its flags; nested `-Dsystem` is ignored.
     run.addArg(if (library == .system)
         b.fmt("-fsys={s}", .{lib_name})
     else
@@ -784,10 +504,7 @@ fn runConsumer(
     return run;
 }
 
-/// Whether this host can execute a binary built for `target`.
-///
-/// Asks `std.zig.system.getExternalExecutor`, which is the same predicate
-/// `Step.Run` applies, so this decision and the nested run cannot disagree.
+/// Use `Step.Run`'s executor check so preflight and execution agree.
 fn hostCanExecute(b: *std.Build, target: std.Build.ResolvedTarget) bool {
     const host = &b.graph.host.result;
     const candidate = &target.result;
@@ -806,7 +523,7 @@ fn hostCanExecute(b: *std.Build, target: std.Build.ResolvedTarget) bool {
     };
 }
 
-/// `freetype2.pc`, relocatable, with every field traceable to upstream.
+/// Generate the relocatable `freetype2.pc` file.
 fn add_pkg_config(b: *std.Build, platform: Platform, linkage: std.builtin.LinkMode) void {
     const files = b.addWriteFiles();
     const install_pc = b.addInstallFileWithDir(
@@ -850,7 +567,7 @@ fn add_pkg_config(b: *std.Build, platform: Platform, linkage: std.builtin.LinkMo
     b.getInstallStep().dependOn(&install_pc.step);
 }
 
-/// Install the licence and provenance records, flattened by basename.
+/// Install license and provenance records under `share/licenses/freetype/`.
 fn install_licence_records(b: *std.Build) void {
     for (licence_records) |record| {
         const install_record = b.addInstallFileWithDir(
@@ -862,11 +579,7 @@ fn install_licence_records(b: *std.Build) void {
     }
 }
 
-/// Check that the two target lists still agree with `Platform.forTarget`.
-///
-/// Both directions, so neither list can quietly become wrong: a target that
-/// `refusalFor` would refuse may not sit in `check_targets`, and one it would
-/// not refuse may not sit in `refused_check_targets`.
+/// Keep accepted and refused compile-check target sets disjoint and complete.
 fn checkMatrixPartition(_: *std.Build) void {
     if (refused_check_targets.len != 0) {
         @panic("build.zig: refused_check_targets is not empty and this build has no refusal to record; see the module doc");
@@ -899,9 +612,7 @@ pub fn build(b: *std.Build) void {
         "Resolve FreeType's entry points through the platform loader at run time instead of linking them. Orthogonal to -Dlinkage, which still decides which artifact is delivered and installed. Default false.",
     ) orelse false;
 
-    // The version-drift gate: the manifest, the vendored headers and the
-    // configure-time print all describe one release or none of them describe
-    // anything real.
+    // Keep the manifest, vendored headers, and build report on one release.
     if (manifest_version.order(upstream_version) != .eq) {
         @panic("build.zig.zon .version no longer matches the version read out of include/freetype/freetype.h; see UPSTREAM.md");
     }
@@ -958,7 +669,6 @@ pub fn build(b: *std.Build) void {
         }
     }
 
-    // Configure-time report. No side effects beyond printing.
     std.debug.print(
         \\
         \\freetype {f}, compiled from this repository's own src/ and builds/

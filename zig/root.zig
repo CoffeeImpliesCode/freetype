@@ -1,117 +1,26 @@
 // SPDX-License-Identifier: MIT
 // See FORK-LICENSE.md for what that identifier covers.
 //
-//! The typed surface over FreeType 2.14.3's face / glyph / load API.
-//!
-//! ## Import routes
-//!
-//! One published route, `dep.module("freetype")`, which is this file. The
-//! translated headers are available on it as `c`, and are never a module of
-//! their own: a consumer that wants `c.FT_Face` directly has it, and a consumer
-//! that wants `Lib` and `Face` has those. Both reach the same translation, so
-//! there is exactly one `FT_Face` type per build whichever is used.
-//!
-//! ## Two configurations: linked and runtime-loaded
-//!
-//! `c` is the translation itself when the library is linked, and the generated
-//! dispatch when `-Druntime=true`. The dispatch re-exports the translated
-//! namespace rather than restating it, so `c.FT_Face` is the same type in both
-//! and everything below works unchanged in both. What differs is `load`:
-//!
-//!   * linked: there is nothing to load, and `load` panics with a message that
-//!     names the mistake rather than pretending to succeed.
-//!   * runtime-loaded: `load` takes an explicit provider and resolves every
-//!     `FT_*` entry point through the platform loader. There is no default
-//!     location and no fallback, and a call to `Lib.init` before a successful
-//!     `load` panics in every optimization mode.
-//!
-//! `runtime_loaded` is `true` exactly when `c` is the dispatch, so a caller can
-//! branch on it without knowing how the package was built.
-//!
-//! ## Memory
-//!
-//! This module allocates nothing and frees nothing on its own. FreeType's
-//! allocator is the C library's: `include/freetype/config/ftstdlib.h:142-145`
-//! maps `ft_scalloc`/`ft_srealloc`/`ft_sfree` onto `calloc`/`realloc`/`free`,
-//! and every `FT_Face`, `FT_Bitmap` buffer and outline point array it hands out
-//! came from there. No Zig allocator can bound or intercept those bytes, so the
-//! test framework's leak checking has no oracle for this package and this
-//! package does not claim one. What it does instead is make every ownership
-//! transition explicit and test it: a `Face` must be `deinit`ed, and every
-//! `Face` must be destroyed before its `Lib`.
-//!
-//! ## Units: the one thing that silently breaks a measurement
-//!
-//! A `FT_Pos` means font units under `Flags.no_scale` and 26.6 pixels
-//! otherwise. Nothing in the C API records which a given `FT_Pos` is, and the
-//! two differ by a factor of 64 on a typical font. `Face.unitsPerEm` is the
-//! conversion, and this module never mixes the two: every measurement helper
-//! here takes or names the flags that produced it, and its doc comment says
-//! which unit the answer is in.
-//!
-//! ## Errors, and what they leave behind
-//!
-//! FreeType answers an `FT_Error`, which is a signed `int`, and this package
-//! maps only the values its own code checked. Every mapping is a comparison
-//! against the constant in `include/freetype/fterrdef.h`, never a
-//! `std.debug.assert`: a public contract is guarded by an ordinary comparison,
-//! because an assertion is compiled out of a release build and then guards
-//! nothing.
-//!
-//! The taxonomy is cut where this package's tests cut it. Everything else
-//! becomes `Error.UnexpectedError`, and the raw `c` route is public so a caller
-//! that needs the exact code can read it.
+//! FreeType facade for library, face, and glyph operations.
 
 const std = @import("std");
 
-/// The translated FreeType headers, or the generated dispatch over them.
-///
-/// ## The macros, and what they become
-///
-/// `zig translate-c` carries each C macro across as an `inline fn` with
-/// unevaluated parameters, so `c.FT_LOAD_NO_HINTING` is a *function*, not a
-/// value, and a flag set has to be written as a call. This module never spells
-/// a flag that way: `Flags` below is a Zig `packed struct` with named,
-/// defaulted fields, so a caller writes `.no_hinting = true` and cannot pass a
-/// flag this build does not implement. A dropped macro becomes a link error
-/// instead of a silent zero, which is the failure mode worth having.
-///
-/// Two macros in FreeType's closure cannot be lowered and are absent from the
-/// translation rather than mistranslated: `FT_HAS_HORIZONTAL`
-/// (`include/freetype/freetype.h:1454`), which expands to a `!!`, and
-/// `FT_ENCODING_*`, whose enum values are built by the `FT_ENC_TAG` macro
-/// (`include/freetype/freetype.h:930`) rather than written out. Neither is used
-/// here, and `Face.selectCharmap` is deliberately absent for the same reason:
-/// wrapping an argument whose translated type is uncertain would be a guess.
+/// Translated FreeType declarations or their runtime dispatch.
 pub const c = @import("c");
 
-/// The loader core, linked builds only.
-///
-/// Under `-Druntime=true` the dispatch carries its own copy of this module and
-/// re-exports `LoadSource` and `LoadError` from it. Importing it separately
-/// there would give a consumer two nominally distinct sets of types: one it
-/// names and one `load` expects.
 const rt = @import("rt");
 
 /// Whether this build resolves FreeType's entry points at run time.
 pub const runtime_loaded: bool = if (@hasDecl(c, "rt_runtime_loaded")) c.rt_runtime_loaded else false;
 
-/// Where a runtime-loaded provider comes from: an absolute path, or a
-/// basename/SONAME the platform loader searches for.
+/// Provider path or loader-searched basename for runtime loading.
 pub const LoadSource = if (runtime_loaded) c.LoadSource else rt.LoadSource;
 
 /// Why a runtime load did not happen.
 pub const LoadError = if (runtime_loaded) c.LoadError else rt.LoadError;
 
-// -- Runtime loading -------------------------------------------------------
-
-/// Resolve every `FT_*` entry point from an explicit provider.
-///
-/// Only meaningful under `-Druntime=true`. A linked build has no provider to
-/// resolve from, so this panics with the reason instead of returning a
-/// plausible-looking success: a linked caller who reaches this is asking for
-/// something the build cannot do, and silently doing nothing would turn that
-/// into a missing-symbol error much later.
+/// Loads all FreeType entry points from an explicit provider.
+/// Runtime-loaded builds require this before library initialization.
 pub fn load(source: LoadSource) LoadError!void {
     if (comptime runtime_loaded) {
         return c.load(source);
@@ -124,43 +33,21 @@ pub fn load(source: LoadSource) LoadError!void {
     );
 }
 
-/// The provider this process published, or `null` if none was published.
-///
-/// A linked build answers `null` always: it was not asked to choose a provider,
-/// it was given one at link time.
+/// Returns the published provider, or null for linked builds or before loading.
 pub fn loadedSource() ?LoadSource {
     if (comptime runtime_loaded) return c.loadedSource();
     return null;
 }
 
-// -- Constants read out of the vendored headers ---------------------------
-
-/// The FreeType release these headers describe.
-///
-/// Read out of `include/freetype/freetype.h:5170-5172`. `build.zig` refuses to
-/// configure when `build.zig.zon`'s `.version` and this tuple disagree, so the
-/// manifest, this tuple and the vendored source cannot describe three different
-/// releases.
+/// FreeType version reported by the translated headers.
 pub const version: std.SemanticVersion = .{
     .major = c.FREETYPE_MAJOR,
     .minor = c.FREETYPE_MINOR,
     .patch = c.FREETYPE_PATCH,
 };
 
-/// `FT_LOAD_*`, as a set of named flags.
-///
-/// Every field defaults to `false`, so `.{ .no_hinting = true }` and `.{}` are
-/// both valid literals and an omitted field means "not requested" rather than
-/// "whatever the previous call used".
-///
-/// The struct is `packed` and each flag sits on the bit
-/// `include/freetype/freetype.h:3500-3526` gives it, with an explicit padding
-/// field for every bit the header assigns to something else. That is what
-/// makes `toInt` a `@bitCast` rather than a hand-written shift: the bit
-/// layout of this struct *is* the `FT_Int32` the header declares, so a field
-/// set here and the corresponding macro set there produce the same value.
-/// Laying the booleans out consecutively instead would shift `no_recurse`
-/// from bit 10 onto bit 6 and make every flag above it silently wrong.
+/// FreeType load flags with upstream bit positions.
+/// Reserved fields preserve the C mask layout; all flags default to false.
 pub const Flags = packed struct(u32) {
     /// `FT_LOAD_NO_SCALE`: metrics and outlines in font units. `1L << 0`.
     no_scale: bool = false,
@@ -211,67 +98,31 @@ pub const Flags = packed struct(u32) {
     /// `FT_LOAD_NO_SVG`. Bit 24.
     _reserved_24_no_svg: u1 = 0,
 
-    /// `FT_LOAD_LINEAR`.
-    ///
-    /// This build's headers define no `FT_LOAD_LINEAR`: `freetype.h:3500-3526`
-    /// is the complete list of `FT_LOAD_*` macros and the word appears nowhere
-    /// in `include/` outside the unrelated `FT_LOAD_LINEAR_DESIGN`. The field
-    /// is kept because it is part of this facade, and it sits on bit 25, which
-    /// no macro in that list claims and which `src/base/ftobjs.c` never tests,
-    /// so setting it changes nothing in the library rather than setting some
-    /// other flag by accident.
+    /// No upstream `FT_LOAD_LINEAR` flag exists; bit 25 is unused.
     linear: bool = false,
-    /// `FT_LOAD_NO_SUBPIXEL_HINTING`.
-    ///
-    /// No macro of this name exists either. Subpixel hinting in this build is a
-    /// compile-time option (`TT_CONFIG_OPTION_SUBPIXEL_HINTING`), not a load
-    /// flag; `include/freetype/ftdriver.h:774` is where the header says so.
-    /// Bit 26, unclaimed for the same reason as `linear`.
+    /// No upstream `FT_LOAD_NO_SUBPIXEL_HINTING` flag exists; bit 26 is unused.
     no_subpixel: bool = false,
-    /// `FT_LOAD_NO_AUTOSUBPIXEL`.
-    ///
-    /// No macro of this name exists in the tree at all. Bit 27, unclaimed for
-    /// the same reason as `linear`.
+    /// No upstream `FT_LOAD_NO_AUTOSUBPIXEL` flag exists; bit 27 is unused.
     no_autosubpixel: bool = false,
-    /// `FT_LOAD_DEFAULT`, which is `0x0`.
-    ///
-    /// Spelled `default_` because `default` is a Zig keyword. The macro is
-    /// literally zero, so this field contributes nothing to the value
-    /// FreeType reads; it exists so a caller can name the empty flag set the
-    /// way the header names it. Bit 28 is unclaimed, so a `true` here cannot
-    /// be mistaken for a real flag.
+    /// `FT_LOAD_DEFAULT` is zero; bit 28 is not an upstream flag.
     default_: bool = false,
 
     /// Bits 29-31 are beyond the highest bit any `FT_LOAD_*` macro claims.
     _reserved_29_31: u3 = 0,
 
-    /// The `FT_Int32` the C header declares, as the header's own bit layout
-    /// gives it.
+    /// Converts this layout to the C `FT_Int32` mask.
     pub fn toInt(self: Flags) c_int {
         return @bitCast(self);
     }
 };
 
-/// Font units, unhinted, unrendered.
-///
-/// The mode every measurement in this file defaults to, because it is the only
-/// one whose numbers can be compared with a font's own tables.
+/// Font-unit mode without hinting or rendering.
 pub const no_scale: Flags = .{ .no_scale = true };
 
-/// Font units, unhinted, no rasterizer involved.
-///
-/// What the sibling `harfbuzz` package's tests rely on: `src/hb-ft.cc:119`
-/// sets `load_flags = FT_LOAD_DEFAULT | FT_LOAD_NO_HINTING`, and this is the
-/// same choice with the scale made explicit.
+/// Font-unit mode with hinting disabled.
 pub const no_scale_no_hinting: Flags = .{ .no_scale = true, .no_hinting = true };
 
-/// `FT_Render_Mode`, re-exported rather than restated.
-///
-/// `include/freetype/freetype.h:3789-3800` numbers `FT_RENDER_MODE_LCD_V` 4 and
-/// `FT_RENDER_MODE_SDF` 5, which is not the order a reader would guess and is
-/// not the order this module would have chosen. A wrapper that renumbered them
-/// would be a second source of truth about upstream's enum, so the enum itself
-/// is the type and the values below are the upstream constants.
+/// The translated upstream `FT_Render_Mode` enum.
 pub const RenderMode = c.FT_Render_Mode;
 
 pub const render_normal: RenderMode = c.FT_RENDER_MODE_NORMAL;
@@ -279,62 +130,35 @@ pub const render_light: RenderMode = c.FT_RENDER_MODE_LIGHT;
 pub const render_mono: RenderMode = c.FT_RENDER_MODE_MONO;
 pub const render_lcd: RenderMode = c.FT_RENDER_MODE_LCD;
 pub const render_lcd_v: RenderMode = c.FT_RENDER_MODE_LCD_V;
-/// The signed-distance-field mode FreeType 2.14 added
-/// (`include/freetype/freetype.h:3796`), served by `src/sdf/`.
+/// FreeType's signed-distance-field rendering mode.
 pub const render_sdf: RenderMode = c.FT_RENDER_MODE_SDF;
 
-// -- Errors ----------------------------------------------------------------
-
-/// The failures this package's own code checked.
-///
-/// Cut at what `tests.zig` and `smoke.zig` actually observe. A caller that
-/// needs a finer distinction calls the raw `c` route and reads the `FT_Error`
-/// itself; that is why `c` is public.
+/// Errors mapped from FreeType codes; all other codes become `UnexpectedError`.
 pub const Error = error{
     /// `FT_Err_Cannot_Open_Resource`: the path does not exist or cannot be read.
     CannotOpenResource,
     /// `FT_Err_Unknown_File_Format`: the stream opened but is not a font one of
     /// this build's ten drivers recognised.
     UnknownFileFormat,
-    /// `FT_Err_Invalid_File_Format`, which is what a stream that is not a
-    /// usable font produces.
-    ///
-    /// This build has no `FT_Err_Invalid_File_Size`: `include/freetype/
-    /// fterrdef.h:65` defines `Invalid_File_Format` at `0x03` and the file's
-    /// remaining entries are `Invalid_Version`, `Lower_Module_Version`,
-    /// `Invalid_Table` and `Invalid_Offset`, with no size code among them. A
-    /// measured probe of this build answers `0x03` for bytes that are not a font
-    /// at all, which is the code that survives, so this tag carries it.
+    /// `FT_Err_Invalid_File_Format` for unusable font data.
     InvalidFileSize,
     /// `FT_Err_Invalid_Argument`: a null handle or an argument out of range.
     InvalidArgument,
-    /// `FT_Err_Invalid_Pixel_Size`: the requested size was outside the range
-    /// `FT_Request_Size` accepts. Note that a zero width or height does *not*
-    /// produce it; see `Face.setPixelSizes`.
+    /// `FT_Err_Invalid_Pixel_Size` for unsupported dimensions.
     InvalidPixelSize,
     /// `FT_Err_Invalid_Glyph_Index`: the index is past `num_glyphs`.
     InvalidGlyphIndex,
     /// `FT_Err_Invalid_Outline`: the outline could not be decomposed.
     InvalidOutline,
-    /// `FT_Err_Unimplemented_Feature`: the module behind an operation is not in
-    /// this build. The typed surface never selects a module this way; the raw
-    /// route can.
+    /// `FT_Err_Unimplemented_Feature` for unsupported operations.
     UnimplementedFeature,
     /// `FT_Err_Out_Of_Memory`: FreeType's own allocator failed.
     OutOfMemory,
-    /// Every code this package did not name. One honest bucket rather than a
-    /// taxonomy of tags nothing checks.
+    /// Any unmapped FreeType error code.
     UnexpectedError,
 };
 
-/// Map one `FT_Error` onto one tag, or onto the error itself.
-///
-/// The constants come from `include/freetype/fterrdef.h`, where every name is
-/// defined through `FT_NOERRORDEF_`; this is the only place this package
-/// decides what an `FT_Error` means. Written as an if-chain rather than a
-/// `switch` so that a prong is a comptime-known integer constant of whatever
-/// width `translate-c` inferred, which a `switch` over a signed `c_int` would
-/// have to prove coercible.
+/// Maps checked FreeType error codes; comparisons handle translated constant widths.
 fn errorFrom(code: c_int) Error!void {
     if (code == c.FT_Err_Ok) return;
     if (code == c.FT_Err_Cannot_Open_Resource) return Error.CannotOpenResource;
@@ -349,40 +173,22 @@ fn errorFrom(code: c_int) Error!void {
     return Error.UnexpectedError;
 }
 
-// -- Library ---------------------------------------------------------------
-
-/// One `FT_Library`.
-///
-/// Owns exactly one C library handle. Faces opened through it must be `deinit`ed
-/// before it is `deinit`ed: FreeType does not check that order for the caller,
-/// and closing a library that still has open faces leaves their `FT_Stream`
-/// pointing at freed memory.
+/// Owns one `FT_Library`; deinitialize every borrowed `Face` first.
 pub const Lib = struct {
     /// The C handle, or `null` after `deinit`.
     raw: c.FT_Library = null,
 
-    /// `FT_Init_FreeType`.
-    ///
-    /// The only failure it reports is `OutOfMemory`: FreeType has no other way
-    /// to fail here, because it has no file and no configuration to disagree
-    /// with yet.
+    /// Initializes FreeType and maps initialization errors.
     pub fn init() Error!Lib {
-        // `FT_Library` is itself the optional `?*struct_FT_LibraryRec_` that
-        // the `FT_New_Face` / `FT_Done_FreeType` parameters also use, so this
-        // local is that type and `&library_handle` is the `[*c]` out-parameter
-        // the signature asks for. Wrapping it in another `?` would make it
-        // `??*T` and the address would no longer match.
+        // Use the translated FT_Library pointer type for FreeType's out-parameter.
         var library_handle: c.FT_Library = null;
         try errorFrom(c.FT_Init_FreeType(&library_handle));
-        // A success with a null handle would mean the translation and the
-        // provider disagree about the signature, which no later call could
-        // diagnose. An ordinary comparison, not an assert: an assert vanishes in
-        // ReleaseFast and then guards nothing.
+        // Reject a null handle explicitly; assertions disappear in ReleaseFast.
         if (library_handle == null) return Error.UnexpectedError;
         return .{ .raw = library_handle };
     }
 
-    /// `FT_Done_FreeType`. Clears `raw`, so a second call is a no-op.
+    /// Closes the library and clears `raw`; repeated calls are safe.
     pub fn deinit(self: *Lib) void {
         if (self.raw) |library| _ = c.FT_Done_FreeType(library);
         self.raw = null;
@@ -393,7 +199,7 @@ pub const Lib = struct {
         return self.raw != null;
     }
 
-    /// The C handle, panicking with the reason if `deinit` already ran.
+    /// Returns the open C handle; panics after `deinit`.
     pub fn handle(self: *const Lib) c.FT_Library {
         return self.raw orelse @panic(
             "freetype: this Lib was closed; deinit() clears the handle and " ++
@@ -402,7 +208,7 @@ pub const Lib = struct {
         );
     }
 
-    /// `FT_Library_Version`: what the *library* reports, not what the headers say.
+    /// Returns the version reported by the library, not the headers.
     pub fn version(self: *const Lib) std.SemanticVersion {
         var major: c_int = 0;
         var minor: c_int = 0;
@@ -415,40 +221,21 @@ pub const Lib = struct {
         };
     }
 
-    /// `FT_New_Face`: open `path` as face `index` of whatever is in it.
-    ///
-    /// The returned `Face` is owned by the caller and must be `deinit`ed before
-    /// this library is.
+    /// Opens a path as face `index`; the caller owns the returned `Face`.
+    /// Deinitialize the face before this library; returns mapped FreeType errors.
     pub fn openFace(self: *const Lib, path: [*:0]const u8, index: c_long) Error!Face {
-        // The out-parameter of `FT_New_Face` is `[*c]FT_Face`, so the local
-        // must be exactly `c.FT_Face`, which translate-c spells as the
-        // many-item pointer `[*c]struct_FT_FaceRec_`. The address of a
-        // narrower `?*T` is not that parameter type and is not coerced to it.
+        // The translated FT_Face pointer type is required for this out-parameter.
         var out: c.FT_Face = null;
         try errorFrom(c.FT_New_Face(self.handle(), path, index, &out));
         if (out == null) return Error.UnexpectedError;
         return .{ .raw = facePtr(out), .library = self };
     }
 
-    /// `FT_New_Memory_Face`: open a face over memory the caller owns.
-    ///
-    /// The bytes must stay alive and unmodified until the `Face` is destroyed.
-    /// That is the whole of what the C API asks for - `include/freetype/
-    /// freetype.h:2611` says only "You must not deallocate the memory before
-    /// calling @FT_Done_Face" - and it is stated here because a face does not
-    /// copy the font: FreeType keeps a stream over the caller's buffer and reads
-    /// tables out of it on demand, so a buffer that goes out of scope, or is
-    /// scribbled on, is read again later and answers whatever it says by then.
-    /// This module cannot see that from inside the library, so the rule is on
-    /// the signature's documentation where a caller will meet it.
-    ///
-    /// `file_size` is an `FT_Long`, so a buffer longer than `maxInt(c_long)`
-    /// cannot be described to it. Comparing is the honest answer; truncating
-    /// would hand FreeType a different font than the caller passed.
+    /// Opens a face over caller-owned bytes; keep them alive and unchanged until `Face.deinit`.
+    /// Rejects buffers larger than `c_long` can represent and maps FreeType errors.
     pub fn openMemoryFace(self: *const Lib, bytes: []const u8, index: c_long) Error!Face {
         if (bytes.len > std.math.maxInt(c_long)) return Error.InvalidArgument;
-        // `FT_New_Memory_Face`'s out-parameter is `[*c]FT_Face` too, so the
-        // local is that type for the same reason `openFace` states.
+        // FT_New_Memory_Face uses the same translated FT_Face out-parameter.
         var out: c.FT_Face = null;
         try errorFrom(c.FT_New_Memory_Face(
             self.handle(),
@@ -461,45 +248,31 @@ pub const Lib = struct {
         return .{ .raw = facePtr(out), .library = self };
     }
 
-    /// `FT_New_Memory_Face` over face 0.
+    /// Opens face 0 from caller-owned bytes; the bytes must outlive the `Face`.
     pub fn openMemoryFaceFirst(self: *const Lib, bytes: []const u8) Error!Face {
         return self.openMemoryFace(bytes, 0);
     }
 };
 
-/// The one pointer conversion this facade needs.
-///
-/// `translate-c` types `FT_Face` as `[*c]struct_FT_FaceRec_`, because that is
-/// what the C `FT_Face*` out-parameter is. Reading a field needs a single-item
-/// pointer, so the handle is stored as `*struct_FT_FaceRec_` and this is where
-/// the out-parameter's many-item pointer becomes it. Only `[*c]T` and `*T`
-/// carry the same address, so the conversion is exact and adds no check.
+/// Converts translate-c's FT_Face out-parameter to the record pointer used here.
+/// Both pointer types carry the same address.
 fn facePtr(face: c.FT_Face) *c.FT_FaceRec {
     return @ptrCast(face);
 }
 
-/// The glyph slot, in the same shape for the same reason as `facePtr`.
-///
-/// `FT_GlyphSlot` is `[*c]struct_FT_GlyphSlotRec_` and `Glyph.slot` reads
-/// `slot->metrics` and `slot->outline`, so it needs a single-item pointer.
-/// `FT_Render_Glyph`'s parameter is `FT_GlyphSlot`, which a `*T` widens to.
+/// Converts `FT_GlyphSlot` to the record pointer used to read glyph data.
+/// FreeType also accepts this pointer form for rendering.
 fn slotPtr(slot: c.FT_GlyphSlot) *c.FT_GlyphSlotRec {
     return @ptrCast(slot);
 }
 
-// -- Face ------------------------------------------------------------------
-
-/// One `FT_Face`.
-///
-/// Owns one C face handle. It borrows its `Lib`: the face must not outlive it.
-/// Nothing here reads through `raw` after `deinit`, because `deinit` clears the
-/// field and a second call is then a no-op rather than a double free.
+/// Owns one face handle and borrows its `Lib`; deinitialize it first.
+/// `deinit` clears the handle, so repeated calls are safe.
 pub const Face = struct {
     raw: ?*c.FT_FaceRec = null,
-    /// Kept so the type is self-describing about what it borrows.
     library: *const Lib,
 
-    /// `FT_Done_Face`. Clears `raw`.
+    /// Closes the face and clears `raw`.
     pub fn deinit(self: *Face) void {
         if (self.raw) |face| _ = c.FT_Done_Face(@ptrCast(face));
         self.raw = null;
@@ -509,7 +282,7 @@ pub const Face = struct {
         return self.raw != null;
     }
 
-    /// The C handle, panicking with the reason if `deinit` already ran.
+    /// Returns the open C handle; panics after `deinit`.
     pub fn handle(self: *const Face) *c.FT_FaceRec {
         return self.raw orelse @panic(
             "freetype: this Face was closed; deinit() clears the handle and " ++
@@ -523,11 +296,7 @@ pub const Face = struct {
         return @intCast(self.handle().num_glyphs);
     }
 
-    /// `face->units_per_EM`: the design grid, in font units per em.
-    ///
-    /// This is the number every other measurement in this file is relative to,
-    /// and it is read straight out of the font's own `head` table by FreeType
-    /// and out of the same table by the test's independent decoder.
+    /// Returns font units per em from the face's design grid.
     pub fn unitsPerEm(self: *const Face) u16 {
         return self.handle().units_per_EM;
     }
@@ -537,67 +306,39 @@ pub const Face = struct {
         return self.handle().num_faces;
     }
 
-    /// `face->family_name`, borrowed.
-    ///
-    /// Borrowed, not owned: the pointer is into FreeType's own face record and
-    /// is invalidated by `deinit`. `dupe` it to keep it past the face.
+    /// Borrowed family name; valid until `Face.deinit`, or null if absent.
     pub fn familyName(self: *const Face) ?[]const u8 {
-        // `family_name` is `FT_String*` (`freetype.h:1239`, `fttypes.h:190`),
-        // which translate-c spells `[*c]u8` rather than a sentinel type, so
-        // the span is computed from the pointer itself instead of from a
-        // dereferenced first byte.
+        // translate-c exposes `FT_String*` as `[*c]u8`; span it to find NUL.
         const name = self.handle().family_name orelse return null;
         return std.mem.span(name);
     }
 
-    /// `face->style_name`, borrowed on the same terms as `familyName`.
+    /// Borrowed style name; valid until `Face.deinit`, or null if absent.
     pub fn styleName(self: *const Face) ?[]const u8 {
         const name = self.handle().style_name orelse return null;
         return std.mem.span(name);
     }
 
-    /// `FT_Get_Char_Index`: the glyph slot `codepoint` maps to, or 0.
-    ///
-    /// Zero is a real answer, not an error: `.notdef` is glyph slot 0, and a
-    /// font that maps nothing to a codepoint answers 0 rather than failing. The
-    /// raw `FT_Error` is discarded because `freetype.h:3370-3374` documents this
-    /// call as never failing for a valid face.
+    /// Returns the glyph slot for `codepoint`; 0 means `.notdef` or no mapping.
+    /// FreeType documents this call as non-failing for a valid face.
     pub fn glyphIndex(self: *const Face, codepoint: u32) u31 {
         return @intCast(c.FT_Get_Char_Index(self.handle(), codepoint));
     }
 
-    /// `FT_Set_Pixel_Sizes`, in pixels.
-    ///
-    /// A zero is not an error in FreeType 2.14.3, and this passes it through
-    /// rather than inventing a rejection. `src/base/ftobjs.c`'s
-    /// `FT_Set_Pixel_Sizes` copies the non-zero argument into the zero one and
-    /// then clamps anything below one up to one, so `(0, 16)`, `(16, 0)` and
-    /// `(0, 0)` all succeed and mean 16x16, 16x16 and 1x1. The caller's own
-    /// zero, if it was meant to be rejected, has to be rejected before the call.
+    /// Sets pixel dimensions; zero dimensions are substituted and clamped to at least 1.
+    /// Returns mapped FreeType errors.
     pub fn setPixelSizes(self: *const Face, width: c_uint, height: c_uint) Error!void {
         try errorFrom(c.FT_Set_Pixel_Sizes(self.handle(), width, height));
     }
 
-    /// `FT_Set_Char_Size`, in 26.6 points at 72 dpi.
-    ///
-    /// The arguments are `FT_F26Dot6`, which is `signed long`, so they are
-    /// `c_long` here and not `c_int`: on a Windows target `c_int` is 32-bit and
-    /// `c_long` is 32-bit too, but on every 64-bit target they differ, and a
-    /// wrapper that narrowed them would be wrong on exactly the platforms whose
-    /// advances this package's sibling tests check.
-    ///
-    /// This is the entry point HarfBuzz uses: `src/hb-ft.cc:177-180` calls it
-    /// with the `hb_font_t` scale, which is why its rounding is documented in
-    /// `runtime/library.zig` rather than guessed at.
+    /// Sets character dimensions in 26.6 points at 72 dpi.
+    /// Uses `c_long` to match `FT_F26Dot6`; returns mapped FreeType errors.
     pub fn setCharSize(self: *const Face, width: c_long, height: c_long) Error!void {
         try errorFrom(c.FT_Set_Char_Size(self.handle(), width, height, 0, 0));
     }
 
-    /// `FT_Load_Glyph`: load `index` into `face->glyph`.
-    ///
-    /// Overwrites whatever was loaded before. A `Glyph` taken from an earlier
-    /// call observes the *new* glyph, which is the C API's rule and the reason
-    /// `Glyph` is a view.
+    /// Loads glyph `index`; the returned view changes on the next glyph load.
+    /// Returns mapped FreeType errors.
     pub fn loadGlyph(self: *const Face, index: u31, flags: Flags) Error!Glyph {
         try errorFrom(c.FT_Load_Glyph(self.handle(), index, flags.toInt()));
         const slot = self.handle().glyph orelse return Error.UnexpectedError;
@@ -611,47 +352,25 @@ pub const Face = struct {
         return .{ .slot = slotPtr(slot) };
     }
 
-    /// `FT_Render_Glyph`: rasterize whatever is currently loaded.
-    ///
-    /// The mode is the translated `FT_Render_Mode` value, passed straight
-    /// through: this build compiled `src/raster`, `src/smooth`, `src/svg` and
-    /// `src/sdf`, so all six modes in the enum are reachable and it is not this
-    /// module's business to second-guess which one a caller picked.
+    /// Renders the current glyph with an upstream mode; returns mapped errors.
     pub fn renderLoaded(self: *const Face, mode: RenderMode) Error!void {
         const slot = self.handle().glyph orelse return Error.InvalidArgument;
         try errorFrom(c.FT_Render_Glyph(@ptrCast(slotPtr(slot)), mode));
     }
 
-    /// `FT_Get_Advance`: the advance of `index` without running the loader.
-    ///
-    /// The unit depends on the flags, and the header is explicit about it:
-    /// `include/freetype/ftadvanc.h:101-103` says the answer "is in 16.16
-    /// format" only when scaling is performed by `load_flags`, and "otherwise
-    /// it is in font units". `no_scale` skips scaling - `src/base/ftadvanc.c`'s
-    /// `ft_face_scale_advances_` returns before it touches `padvance` - so
-    /// under `no_scale` this is the font's own `hmtx` entry in font units, which
-    /// is the form the known-answer tests compare against their own decode.
-    /// Under any scaled flag it is 16.16.
+    /// Returns the advance; `no_scale` uses font units, scaled flags use 16.16.
+    /// Returns mapped FreeType errors.
     pub fn advance(self: *const Face, index: u31, flags: Flags) Error!i64 {
         var value: c_long = 0;
         try errorFrom(c.FT_Get_Advance(self.handle(), index, flags.toInt(), &value));
         return value;
     }
 
-    /// `FT_Get_Glyph_Name`: the `post` table's name for `index`.
-    ///
-    /// FreeType's own signature takes a caller-owned buffer and its length
-    /// (`include/freetype/freetype.h:4475-4478`), and it is the buffer that
-    /// decides whether a long name is truncated, so this keeps that shape rather
-    /// than allocating behind the caller's back. `buffer` must have room for a
-    /// NUL; a zero-length buffer is `InvalidArgument` here rather than a
-    /// guaranteed `InvalidArgument` from C.
+    /// Writes the post-table name to caller-owned storage and returns bytes up to NUL.
+    /// The buffer must be nonempty; returns mapped FreeType errors.
     pub fn glyphName(self: *const Face, index: u31, buffer: []u8) Error![]const u8 {
         if (buffer.len == 0) return Error.InvalidArgument;
-        // The name is written into `buffer` and always NUL-terminated inside
-        // it, and the first byte is set to 0 on failure
-        // (`include/freetype/freetype.h:4458-4464`). There is no length out
-        // parameter: the prefix up to the first NUL is the whole answer.
+        // FreeType NUL-terminates the buffer and provides no separate length.
         try errorFrom(c.FT_Get_Glyph_Name(
             self.handle(),
             index,
@@ -663,15 +382,8 @@ pub const Face = struct {
     }
 };
 
-// -- Glyph -----------------------------------------------------------------
-
-/// One loaded glyph: a borrowed view of `face->glyph`.
-///
-/// Borrowed, not owned. The record belongs to the `Face` and `FT_Load_Glyph`
-/// overwrites it, so a `Glyph` that outlives its next load observes the new
-/// glyph. That is the C API's rule; this wrapper states it rather than copying,
-/// because a copy of an `FT_Outline` would have to copy the point array too and
-/// the array belongs to FreeType's allocator.
+/// Borrowed view of `face->glyph`; the next glyph load overwrites it.
+/// The `Face` owns the glyph slot and its buffers.
 pub const Glyph = struct {
     slot: *c.FT_GlyphSlotRec,
 
@@ -680,10 +392,8 @@ pub const Glyph = struct {
         return @intCast(self.slot.glyph_index);
     }
 
-    /// `slot->metrics.horiAdvance`, in whatever units the load used.
-    ///
-    /// Font units under `no_scale`, 26.6 pixels otherwise. Read
-    /// `linearHorizontalAdvance` when the answer must not depend on a hinter.
+    /// Returns the advance in font units under `no_scale`, 26.6 pixels otherwise.
+    /// Use `linearHorizontalAdvance` for design-space metrics.
     pub fn horizontalAdvance(self: Glyph) i64 {
         return self.slot.metrics.horiAdvance;
     }
@@ -698,30 +408,13 @@ pub const Glyph = struct {
         return self.slot.metrics.height;
     }
 
-    /// `slot->linearHoriAdvance`: the advance in design space, unhinted.
-    ///
-    /// `FT_LOAD_NO_HINTING` does **not** fill this in. `src/base/ftobjs.c:1110`
-    /// writes the field only when `FT_LOAD_LINEAR_DESIGN` is set, so a load
-    /// without that flag leaves it at zero, which is what a measured load of
-    /// this package's fixture answers. Set `Flags.linear_design` to ask for it.
-    ///
-    /// When it is filled it is the font's own `hmtx` entry in *font units* under
-    /// `no_scale` - not 16.16 of it - which is what makes it comparable with a
-    /// font's tables without any scaling or rounding. That is what the
-    /// known-answer tests use.
+    /// Returns design-space advance in font units; set `linear_design` to populate it.
+    /// Without that flag, FreeType may leave the field zero.
     pub fn linearHorizontalAdvance(self: Glyph) i64 {
         return self.slot.linearHoriAdvance;
     }
 
-    /// `FT_Outline_Get_CBox` on `slot->outline`: the control box.
-    ///
-    /// `src/base/ftoutln.c:470-514` computes this as the min and max over
-    /// *every* point, control points included, with no margin. For a TrueType
-    /// glyph that is exactly the `glyf` entry's `xMin`/`yMin`/`xMax`/`yMax`,
-    /// which is the equality `tests.zig` asserts against its own table decode.
-    ///
-    /// An empty outline answers all zero, per the `n_points == 0` branch at
-    /// `src/base/ftoutln.c:478-484`.
+    /// Returns the control box over all outline points; an empty outline yields zero.
     pub fn controlBox(self: Glyph) BBox {
         var box: c.FT_BBox = undefined;
         c.FT_Outline_Get_CBox(&self.slot.outline, &box);
@@ -733,13 +426,7 @@ pub const Glyph = struct {
         };
     }
 
-    /// `FT_Outline_Get_BBox` on `slot->outline`: the tight box.
-    ///
-    /// Fallible where `controlBox` is not: `include/freetype/ftbbox.h:84`
-    /// declares an `FT_Error`, and `src/base/ftbbox.c:486-489` returns
-    /// `Invalid_Argument` for a null outline and `Invalid_Outline` when the
-    /// decomposition fails. Discarding that code would report a box FreeType
-    /// never computed, so the error is mapped like every other one.
+    /// Returns the tight outline box or a mapped error if FreeType cannot compute it.
     pub fn exactBox(self: Glyph) Error!BBox {
         var box: c.FT_BBox = undefined;
         try errorFrom(c.FT_Outline_Get_BBox(&self.slot.outline, &box));
@@ -761,11 +448,7 @@ pub const Glyph = struct {
         return self.slot.outline.n_contours;
     }
 
-    /// The rendered bitmap, borrowed from the slot.
-    ///
-    /// Empty until `Face.renderLoaded` has run: an unrendered slot has
-    /// `FT_GLYPH_FORMAT_OUTLINE` and a zero-sized bitmap, and this returns that
-    /// honestly rather than pretending a render happened.
+    /// Returns a borrowed bitmap view; it is empty until rendering produces pixels.
     pub fn bitmap(self: Glyph) Bitmap {
         return .{ .rec = &self.slot.bitmap };
     }
@@ -779,9 +462,7 @@ pub const BBox = struct {
     y_max: i64,
 };
 
-/// A borrowed `FT_Bitmap` view.
-///
-/// Borrowed from the glyph slot on the same terms as `Glyph` itself.
+/// Borrowed bitmap view; invalidated by the next glyph load or `Face.deinit`.
 pub const Bitmap = struct {
     rec: *c.FT_Bitmap,
 
@@ -798,12 +479,7 @@ pub const Bitmap = struct {
         return self.rec.num_grays;
     }
 
-    /// `buffer` as a slice, or an empty slice when nothing is rendered.
-    ///
-    /// `pitch` is honoured rather than assumed away: FreeType's `pitch` is the
-    /// distance between consecutive rows in bytes and is *negative* for a
-    /// bottom-up bitmap, so a wrapper that indexed `row * width` would read the
-    /// bitmap transposed for half the renderers.
+    /// Returns `width * rows` buffer bytes, or empty when data is unavailable.
     pub fn pixels(self: Bitmap) []const u8 {
         const buffer = self.rec.buffer orelse return &.{};
         const pitch = self.rec.pitch;
