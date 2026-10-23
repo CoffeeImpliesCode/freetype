@@ -1,22 +1,9 @@
 .{
     .name = .freetype_consumer,
     .version = "0.1.0",
-    // Zig 0.16.0's manifest reader requires this field and derives its value
-    // from the package name alone; when it is missing the compiler prints the
-    // correct one. `zig build consumer` on this tree printed:
-    //
-    //     missing top-level 'fingerprint' field; suggested value: 0x8eefcbb466f8183e
-    //
-    // so that is the value written here, exactly as the parent package's own
-    // `build.zig.zon:9` does. Reproducing the derivation by hand would be
-    // guessing at the one identifier whose purpose is to not be guessable.
     .fingerprint = 0x8eefcbb466f8183e,
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
-        // A relative path, not a registry or archive URL. The consumer is the
-        // proof that `dep.module("freetype")` works from outside the package
-        // that defines it; resolving that through the network would make the
-        // proof depend on a published state of the world instead.
         .freetype = .{ .path = ".." },
     },
     .paths = .{

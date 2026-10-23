@@ -1,13 +1,13 @@
 # FreeType 2.14.3
 
-FreeType 2.14.3 is a C font engine for TrueType and OpenType. This package builds its unchanged upstream source with Zig 0.16.0.
+FreeType 2.14.3 is a C font engine for TrueType and OpenType. This package builds its unchanged upstream source with Zig 0.17.0.
 It exposes one typed Zig module and supports linked or runtime-loaded use.
 
 ## Source deviations from upstream
 
 The imported FreeType files under `include/`, `src/`, `builds/`, `docs/`, `tests/`, `devel/`, `subprojects/` and the upstream release files are unmodified.
 
-This fork adds the Zig facade and translation header in `zig/`, the runtime loader in `runtime/`, its build graph, tests, smoke program, consumer package, provenance tool and package documentation.
+This fork adds the Zig facade and translation header in `zig/`, the runtime loader in `runtime/`, its build graph, tests, smoke program, consumer example, provenance tool and package documentation.
 
 `tests/fixtures/HarfBust.ttf` is HarfBuzz 14.5.1's Latin test font, distributed with its gzip copy and SIL Open Font License 1.1 text in `tests/fixtures/COPYING`. It is test data, not FreeType source.
 

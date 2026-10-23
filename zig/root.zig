@@ -183,7 +183,7 @@ pub const Lib = struct {
         // Use the translated FT_Library pointer type for FreeType's out-parameter.
         var library_handle: c.FT_Library = null;
         try errorFrom(c.FT_Init_FreeType(&library_handle));
-        // Reject a null handle explicitly; assertions disappear in ReleaseFast.
+        // Reject a null handle explicitly; assertions disappear in fast mode.
         if (library_handle == null) return Error.UnexpectedError;
         return .{ .raw = library_handle };
     }

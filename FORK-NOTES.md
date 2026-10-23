@@ -14,7 +14,7 @@ The imported FreeType tree is unmodified; the fork adds these sources:
 - `runtime/sync.c`: implements synchronization with pthreads, Windows primitives, or single-thread WASI/Emscripten stubs.
 - `tests.zig`: adds regression tests for the Zig facade.
 - `smoke.zig`: adds a linked or runtime-loaded smoke program.
-- `consumer/src/main.zig`: demonstrates using the package as a dependency.
+- `consumer/`: exercises `dep.module("freetype")` from a standalone package with `.path = ".."`.
 - `tests/fixtures/HarfBust.ttf` and `.gz`: add HarfBuzz's Latin test font for package tests.
 
 ## Build graph deviations
@@ -26,6 +26,8 @@ The imported FreeType tree is unmodified; the fork adds these sources:
 - Runtime mode routes `FT_*` calls through an explicit provider; `-Dsystem=true` selects an installed library, while linkage can be static or dynamic.
 - Dynamic ELF builds export `FT_*` through a version script; Mach-O and COFF use no version script.
 - ELF SONAME is `libfreetype.so.6`; Zig names the versioned file `libfreetype.so.6.26.20`, while upstream libtool names it `libfreetype.so.6.20.6`.
+- The consumer step launches Zig 0.17 with `--build-file`, forwards `ZIG_GLOBAL_CACHE_DIR` and `ZIG_LIB_DIR`, and uses a separate local cache.
+- Cross-target consumer steps build and install without running; native consumer steps run the program.
 
 ## Platform boundaries
 

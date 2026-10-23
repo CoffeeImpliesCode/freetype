@@ -253,9 +253,9 @@ fn translateCRiscvFloatAbi(target: std.Build.ResolvedTarget) ?[2][]const u8 {
 fn addGraph(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     library: Library,
-    linkage: std.builtin.LinkMode,
+    linkage: std.lang.LinkMode,
     runtime_loaded: bool,
     public: bool,
 ) Graph {
@@ -318,8 +318,8 @@ fn addGraph(
 fn add_c_library(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
-    requested: std.builtin.LinkMode,
+    optimize: std.lang.Optimize,
+    requested: std.lang.LinkMode,
     platform: Platform,
     name: []const u8,
 ) *std.Build.Step.Compile {
@@ -392,7 +392,7 @@ fn targetHasDynamicLinker(target: std.Build.ResolvedTarget) bool {
 }
 
 /// Reject dynamic mode without a dynamic linker; do not substitute static.
-fn deliveredLinkage(target: std.Build.ResolvedTarget, requested: std.builtin.LinkMode) std.builtin.LinkMode {
+fn deliveredLinkage(target: std.Build.ResolvedTarget, requested: std.lang.LinkMode) std.lang.LinkMode {
     if (requested == .dynamic and !targetHasDynamicLinker(target)) {
         std.debug.panic(
             "freetype: -Dlinkage=dynamic was asked for {s}, which has no " ++
@@ -408,9 +408,9 @@ fn deliveredLinkage(target: std.Build.ResolvedTarget, requested: std.builtin.Lin
 fn add_target_check(
     b: *std.Build,
     query: std.Target.Query,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     library: Library,
-    linkage: std.builtin.LinkMode,
+    linkage: std.lang.LinkMode,
     runtime_loaded: bool,
     step: *std.Build.Step,
 ) void {
@@ -443,88 +443,8 @@ fn add_target_check(
     }).step);
 }
 
-fn runConsumer(
-    b: *std.Build,
-    target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
-    library: Library,
-    linkage: std.builtin.LinkMode,
-    runtime_loaded: bool,
-) *std.Build.Step.Run {
-    const triple = target.query.zigTriple(b.allocator) catch @panic("OOM");
-    defer b.allocator.free(triple);
-    const cpu = target.query.serializeCpuAlloc(b.allocator) catch @panic("OOM");
-    defer b.allocator.free(cpu);
-
-    const run = b.addSystemCommand(&.{ b.graph.zig_exe, "build" });
-    run.setName("consumer package");
-    run.setCwd(b.path("consumer"));
-    run.addArg(if (hostCanExecute(b, target)) "run" else "install");
-    run.addArg(b.fmt("-Dtarget={s}", .{triple}));
-    run.addArg(b.fmt("-Dcpu={s}", .{cpu}));
-    run.addArg(b.fmt("-Doptimize={s}", .{@tagName(optimize)}));
-    run.addArg(b.fmt("-Dlinkage={s}", .{@tagName(linkage)}));
-    run.addArg(b.fmt("-Druntime={s}", .{if (runtime_loaded) "true" else "false"}));
-    // Forward system integration through its flags; nested `-Dsystem` is ignored.
-    run.addArg(if (library == .system)
-        b.fmt("-fsys={s}", .{lib_name})
-    else
-        b.fmt("-fno-sys={s}", .{lib_name}));
-    if (b.enable_darling) run.addArg("-fdarling");
-    if (b.enable_qemu) run.addArg("-fqemu");
-    if (b.enable_rosetta) run.addArg("-frosetta");
-    if (b.enable_wasmtime) run.addArg("-fwasmtime");
-    if (b.enable_wine) run.addArg("-fwine");
-    if (b.libc_runtimes_dir) |runtimes| run.addArgs(&.{ "--libc-runtimes", runtimes });
-    run.addArg("-j8");
-    run.addArg("--summary");
-    run.addArg("all");
-    if (b.cache_root.path) |cache| {
-        run.addArg("--cache-dir");
-        run.addArg(b.fmt("{s}/consumer", .{cache}));
-    }
-    if (b.graph.global_cache_root.path) |global_cache| {
-        run.addArg("--global-cache-dir");
-        run.addArg(global_cache);
-    }
-    const default_prefix = b.build_root.join(b.allocator, &.{"zig-out"}) catch @panic("OOM");
-    if (!std.mem.eql(u8, b.install_prefix, default_prefix)) {
-        const prefix = if (std.fs.path.isAbsolute(b.install_prefix))
-            b.install_prefix
-        else
-            b.pathJoin(&.{ b.graph.cache.cwd, b.install_prefix });
-        run.addArg("--prefix");
-        run.addArg(prefix);
-    }
-    if (b.args) |args| {
-        run.addArg("--");
-        run.addArgs(args);
-    }
-    run.has_side_effects = true;
-    return run;
-}
-
-/// Use `Step.Run`'s executor check so preflight and execution agree.
-fn hostCanExecute(b: *std.Build, target: std.Build.ResolvedTarget) bool {
-    const host = &b.graph.host.result;
-    const candidate = &target.result;
-    const options: std.zig.system.GetExternalExecutorOptions = .{
-        .allow_darling = b.enable_darling,
-        .allow_qemu = b.enable_qemu,
-        .allow_wasmtime = b.enable_wasmtime,
-        .allow_wine = b.enable_wine,
-        .qemu_fixes_dl = candidate.isGnuLibC() and b.libc_runtimes_dir != null,
-        .link_libc = true,
-    };
-    return switch (std.zig.system.getExternalExecutor(b.graph.io, host, candidate, options)) {
-        .native, .rosetta, .wine, .wasmtime, .darling => true,
-        .qemu => !(candidate.isGnuLibC() and b.libc_runtimes_dir == null),
-        .bad_dl, .bad_os_or_cpu => false,
-    };
-}
-
 /// Generate the relocatable `freetype2.pc` file.
-fn add_pkg_config(b: *std.Build, platform: Platform, linkage: std.builtin.LinkMode) void {
+fn add_pkg_config(b: *std.Build, platform: Platform, linkage: std.lang.LinkMode) void {
     const files = b.addWriteFiles();
     const install_pc = b.addInstallFileWithDir(
         files.add("freetype2.pc", b.fmt(
@@ -586,6 +506,56 @@ fn checkMatrixPartition(_: *std.Build) void {
     }
 }
 
+fn runConsumer(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+    library: Library,
+    linkage: std.lang.LinkMode,
+    runtime_loaded: bool,
+) *std.Build.Step.Run {
+    const triple = target.query.zigTriple(b.allocator) catch @panic("OOM");
+    defer b.allocator.free(triple);
+    const cpu = target.query.serializeCpuAlloc(b.allocator) catch @panic("OOM");
+    defer b.allocator.free(cpu);
+
+    const run = b.addSystemCommand(&.{ b.graph.zig_exe, "build" });
+    run.setName("consumer package");
+    // Keep relative cache and Zig library environment paths anchored to the caller's cwd.
+    run.addArg("--build-file");
+    run.addFileArg2(b.path("consumer/build.zig"), .{ .make_absolute = true });
+    for ([_][]const u8{ "ZIG_GLOBAL_CACHE_DIR", "ZIG_LIB_DIR" }) |key| {
+        if (b.graph.environ_map.get(key)) |value| run.setEnvironmentVariable(key, value);
+    }
+    run.addArg(if (target.query.isNative()) "run" else "install");
+    run.addArg(b.fmt("-Dtarget={s}", .{triple}));
+    run.addArg(b.fmt("-Dcpu={s}", .{cpu}));
+    run.addArg(b.fmt("-Doptimize={s}", .{@tagName(optimize)}));
+    run.addArg(b.fmt("-Dlinkage={s}", .{@tagName(linkage)}));
+    run.addArg(b.fmt("-Druntime={}", .{runtime_loaded}));
+    run.addArg(if (library == .system) "-fsys=freetype" else "-fno-sys=freetype");
+    run.addThirdPartyEnabledArgDarling(.{ .enabled = "-fdarling" });
+    run.addThirdPartyEnabledArgQemu(.{ .enabled = "-fqemu" });
+    run.addThirdPartyEnabledArgRosetta(.{ .enabled = "-frosetta" });
+    run.addThirdPartyEnabledArgWasmtime(.{ .enabled = "-fwasmtime" });
+    run.addThirdPartyEnabledArgWine(.{ .enabled = "-fwine" });
+    run.addArgs(&.{ "-j8", "--summary", "all" });
+    run.addArg("--cache-dir");
+    run.addDirectoryArg2(
+        .{ .relative = .{ .base = .local_cache, .sub_path = "consumer" } },
+        .{ .make_absolute = true },
+    );
+    run.addArg("--prefix");
+    run.addDirectoryArg2(
+        .{ .relative = .{ .base = .install_prefix } },
+        .{ .make_absolute = true },
+    );
+    run.addArg("--");
+    run.addPassthruArgs();
+    run.has_side_effects = true;
+    return run;
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -599,11 +569,11 @@ pub fn build(b: *std.Build) void {
     const library: Library = if (use_system) .system else .bundled;
 
     const linkage_option = b.option(
-        std.builtin.LinkMode,
+        std.lang.LinkMode,
         "linkage",
         "How the library is delivered. static gives libfreetype.a, which is upstream's own build product; dynamic gives a real shared object.",
     );
-    const linkage: std.builtin.LinkMode = linkage_option orelse
+    const linkage: std.lang.LinkMode = linkage_option orelse
         (if (library == .system) .dynamic else .static);
 
     const runtime_loaded = b.option(
@@ -638,9 +608,11 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&example.step);
 
     const run_example = b.addRunArtifact(example);
-    run_example.has_side_effects = true;
-    if (b.args) |args| run_example.addArgs(args);
+    run_example.addPassthruArgs();
     b.step("smoke", "Run the deterministic example program").dependOn(&run_example.step);
+
+    b.step("consumer", "Build or run the standalone consumer package for the selected target")
+        .dependOn(&runConsumer(b, target, optimize, library, linkage, runtime_loaded).step);
 
     const test_mod = b.createModule(.{
         .root_source_file = b.path(test_source),
@@ -653,9 +625,6 @@ pub fn build(b: *std.Build) void {
     const run_tests = b.addRunArtifact(unit_tests);
     run_tests.has_side_effects = true;
     b.step("test", "Run the behavioural tests").dependOn(&run_tests.step);
-
-    b.step("consumer", "Build or run the consumer/ package for the selected target")
-        .dependOn(&runConsumer(b, target, optimize, library, deliveredLinkage(target, linkage), runtime_loaded).step);
 
     const check_step = b.step(
         "check",

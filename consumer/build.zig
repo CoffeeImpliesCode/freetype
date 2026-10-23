@@ -9,18 +9,14 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const linkage = b.option(
-        std.builtin.LinkMode,
+        std.lang.LinkMode,
         "linkage",
-        "Which delivery of libfreetype to check. Forwarded to the dependency; it " ++
-            "decides the artifact, never anything in this package.",
+        "Library linkage forwarded to the FreeType dependency",
     ) orelse .static;
     const runtime_loaded = b.option(
         bool,
         "runtime",
-        "Check the dependency's runtime-loading dispatch instead of a linked " ++
-            "one. Forwarded to the dependency. A program built this way has to " ++
-            "name a provider with an explicit load() before any native call, " ++
-            "which is src/main.zig's business and not this file's.",
+        "Load an explicit FreeType provider at run time instead of linking",
     ) orelse false;
 
     const dep = b.dependency("freetype", .{
@@ -30,9 +26,7 @@ pub fn build(b: *std.Build) void {
         .runtime = runtime_loaded,
     });
 
-    // Dependencies share the graph and receive the runner's system-integration flags.
-
-    // The dependency provides libc. Do not hide a missing library requirement here.
+    // The dependency supplies libc through its public module.
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -48,8 +42,7 @@ pub fn build(b: *std.Build) void {
 
     const run_exe = b.addRunArtifact(exe);
     run_exe.has_side_effects = true;
-    // Forward command-line arguments to the consumer program.
-    if (b.args) |args| run_exe.addArgs(args);
+    run_exe.addPassthruArgs();
     const run_step = b.step("run", "Build and run the consumer program");
     run_step.dependOn(&run_exe.step);
 }

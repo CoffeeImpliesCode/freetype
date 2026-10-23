@@ -5,7 +5,7 @@
     .fingerprint = 0xac2059b6dfa9d2f2,
     // Upstream release, checked against the vendored headers by build.zig.
     .version = "2.14.3",
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     // No external Zig dependencies.
     .dependencies = .{},
     .paths = .{
@@ -38,10 +38,8 @@
         ".clang-format",
         "tests.zig",
         "smoke.zig",
-        // Standalone consumer package.
-        "consumer/build.zig",
-        "consumer/build.zig.zon",
-        "consumer/src/main.zig",
+        // Standalone package exercising dep.module("freetype").
+        "consumer",
         // Source-provenance checker.
         "tools",
         // Runtime loader and generated dispatch.
