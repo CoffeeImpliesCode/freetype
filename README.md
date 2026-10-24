@@ -35,12 +35,10 @@ No configure step runs and no header is generated. The build writes a relocatabl
 
 ## Consumption
 
-For a local checkout, add this dependency to `build.zig.zon`:
+Fetch the tagged package from GitHub into `build.zig.zon`:
 
-```zig
-.dependencies = .{
-    .freetype = .{ .path = "../freetype" },
-},
+```sh
+zig fetch --save git+https://github.com/CoffeeImpliesCode/freetype#v2.14.3
 ```
 
 The dependency and its C artifact are named `freetype`. Import the typed module with `dep.module("freetype")`; `dep.artifact("freetype")` names the library artifact.
