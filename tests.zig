@@ -29,8 +29,9 @@ fn nativeReady() void {
             "(libfreetype.so.6, or the equivalent on this platform) before " ++
             "running these tests. There is no default location.",
     );
-    ft.load(.{ .path = std.mem.span(path) }) catch |err| @panic(
-        "freetype: the provider named by " ++ provider_variable ++ " could not be loaded: " ++ @errorName(err),
+    ft.load(.{ .path = std.mem.span(path) }) catch |err| std.debug.panic(
+        "freetype: the provider named by {s} could not be loaded: {s}",
+        .{ provider_variable, @errorName(err) },
     );
 }
 

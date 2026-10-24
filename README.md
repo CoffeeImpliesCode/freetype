@@ -28,10 +28,10 @@ No configure step runs and no header is generated. The build writes a relocatabl
 | Static, default | Builds the `freetype` artifact as `libfreetype.a`. |
 | Dynamic | Builds a shared artifact; ELF uses SONAME `libfreetype.so.6` and file name `libfreetype.so.6.26.20`. The target must have a dynamic linker. |
 | Runtime loading | `-Druntime=true` resolves `FT_*` through the platform loader. It is independent of linkage and requires an explicit provider. |
-| System library | `-Dsystem=true` or `-fsys=freetype` uses an installed `libfreetype` instead of compiling `src/`. |
+| System library | `-Dsystem=true` or `-fsys=freetype` uses an installed `libfreetype` instead of compiling `src/`. Pass `--search-prefix /path/to/sdk` for a custom installation; translation and the standalone consumer use its `include/freetype2` headers and `lib` directory. |
 | Target platform | Unix-like targets with the required headers use mmap; Windows uses its file-mapping implementation; other targets use the stdio implementation. |
-| Cross-target graph | `x86_64-linux-gnu`, `aarch64-linux-gnu`, `aarch64-macos-none`, `x86_64-windows-gnu`, `riscv64-linux-gnu`, `wasm32-wasi`. |
-| `wasm32-wasi` | Selects stdio `ftsystem.c`, but `ftstdlib.h` includes `<setjmp.h>` and the pinned wasi-libc requires WebAssembly exception handling for setjmp. |
+| Cross-target graph | `x86_64-linux-gnu`, `aarch64-linux-gnu`, `aarch64-macos-none`, `x86_64-windows-gnu`, `riscv64-linux-gnu`, `wasm32-wasi`. Native dynamic and runtime-loaded checks omit targets without a dynamic loader. Explicit cross-target checks use only the selected target. |
+| `wasm32-wasi` | Static linked mode only. Selects stdio `ftsystem.c`, but `ftstdlib.h` includes `<setjmp.h>` and the pinned wasi-libc requires WebAssembly exception handling for setjmp. |
 
 ## Consumption
 
@@ -55,6 +55,6 @@ const dep = b.dependency("freetype", .{
 exe_mod.addImport("freetype", dep.module("freetype"));
 ```
 
-`linkage` defaults to `.static`; `runtime` defaults to `false`. Use `-Dsystem=true` or `-fsys=freetype` to select an installed library. Standard `target` and `optimize` options also apply.
+`linkage` defaults to `.static` for bundled builds and `.dynamic` for system builds; `runtime` defaults to `false`. Use `-Dsystem=true` or `-fsys=freetype` to select an installed library. Standard `target` and `optimize` options also apply.
 
-For C consumers, use `pkg-config --cflags --libs freetype2` from the installed tree. Its include root is `freetype2`.
+For C consumers, use `pkg-config --cflags --libs freetype2` from the installed tree. Its include root is `freetype2`, with public headers and the shipped configuration headers used to compile the library.

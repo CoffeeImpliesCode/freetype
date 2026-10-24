@@ -78,10 +78,16 @@ const base_extensions = [_][]const u8{
 /// FreeType's separate debug unit (`meson.build:247-252`).
 const debug_source = "src/base/ftdebug.c";
 
-/// The 47 public headers, including `ft2build.h` required for bare-name includes
-/// (`include/freetype/freetype.h:76-81`).
+/// Public headers and their configuration dependencies (`meson.build:139-195`).
 const public_headers = [_][]const u8{
     "include/ft2build.h",
+    "include/freetype/config/ftconfig.h",
+    "include/freetype/config/ftheader.h",
+    "include/freetype/config/ftoption.h",
+    "include/freetype/config/ftstdlib.h",
+    "include/freetype/config/integer-types.h",
+    "include/freetype/config/mac-support.h",
+    "include/freetype/config/public-macros.h",
     "include/freetype/freetype.h",
     "include/freetype/ftadvanc.h",
     "include/freetype/ftbbox.h",
@@ -171,7 +177,7 @@ const check_targets = [_]std.Target.Query{
 
 /// WASI's `include/freetype/config/ftstdlib.h:166` includes `<setjmp.h>`.
 /// wasi-libc requires `__wasm_exception_handling__` (`libc/include/wasm-wasi-musl/setjmp.h:13`).
-/// Keep the target in the check matrix; do not filter this toolchain boundary.
+/// Static linked checks retain WASI despite this toolchain boundary.
 const refused_check_targets = [_]std.Target.Query{};
 
 const Graph = struct {
@@ -293,6 +299,13 @@ fn addGraph(
     translate.defineCMacro("FT2_BUILD_LIBRARY", "1");
     if (translateCRiscvFloatAbi(target)) |macro| translate.defineCMacro(macro[0], macro[1]);
     if (library == .system) {
+        // Zig 0.17's TranslateC does not inherit the maker's search prefixes.
+        b.graph.poisonCache();
+        for (b.graph.search_prefixes.items) |prefix| {
+            translate.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "include", install_include_subdir }) });
+            translate.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "include" }) });
+            translate.addCFlags(&.{ "-L", b.pathJoin(&.{ prefix, "lib" }) });
+        }
         translate.linkSystemLibrary(lib_name, .{ .preferred_link_mode = linkage });
     }
 
@@ -318,6 +331,8 @@ fn addGraph(
         module.addImport("c", translate.createModule());
         module.addImport("rt", graph.createCoreModule(b, target, optimize));
         if (c_lib) |lib| module.linkLibrary(lib);
+        if (library == .system and linkage == .static and platform.separate_m)
+            module.linkSystemLibrary("m", .{});
     }
     if (library == .bundled) module.addIncludePath(b.path(include_dir));
 
@@ -416,14 +431,13 @@ fn deliveredLinkage(target: std.Build.ResolvedTarget, requested: std.lang.LinkMo
 /// Compile one target's surface without running it.
 fn add_target_check(
     b: *std.Build,
-    query: std.Target.Query,
+    cross_target: std.Build.ResolvedTarget,
     optimize: std.lang.Optimize,
     library: Library,
     linkage: std.lang.LinkMode,
     runtime_loaded: bool,
     step: *std.Build.Step,
 ) void {
-    const cross_target = b.resolveTargetQuery(query);
     const triple = cross_target.result.zigTriple(b.allocator) catch @panic("unspellable target");
     const cross = addGraph(b, cross_target, optimize, library, linkage, runtime_loaded, false);
 
@@ -543,6 +557,12 @@ fn runConsumer(
     run.addArg(b.fmt("-Dlinkage={s}", .{@tagName(linkage)}));
     run.addArg(b.fmt("-Druntime={}", .{runtime_loaded}));
     run.addArg(if (library == .system) "-fsys=freetype" else "-fno-sys=freetype");
+    if (library == .system) {
+        b.graph.poisonCache();
+        for (b.graph.search_prefixes.items) |prefix| {
+            run.addArgs(&.{ "--search-prefix", prefix });
+        }
+    }
     run.addThirdPartyEnabledArgDarling(.{ .enabled = "-fdarling" });
     run.addThirdPartyEnabledArgQemu(.{ .enabled = "-fqemu" });
     run.addThirdPartyEnabledArgRosetta(.{ .enabled = "-frosetta" });
@@ -640,10 +660,12 @@ pub fn build(b: *std.Build) void {
         "Compile the library, facade, tests and example for the cross targets, running nothing",
     );
     if (!target.query.isNative()) {
-        add_target_check(b, target.query, optimize, library, linkage, runtime_loaded, check_step);
+        add_target_check(b, target, optimize, library, linkage, runtime_loaded, check_step);
     } else {
         for (check_targets[0..]) |query| {
-            add_target_check(b, query, optimize, library, linkage, runtime_loaded, check_step);
+            const cross_target = b.resolveTargetQuery(query);
+            if ((linkage == .dynamic or runtime_loaded) and !targetHasDynamicLinker(cross_target)) continue;
+            add_target_check(b, cross_target, optimize, library, linkage, runtime_loaded, check_step);
         }
     }
 

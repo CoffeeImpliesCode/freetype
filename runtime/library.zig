@@ -80,7 +80,7 @@ pub fn Config(comptime dispatch: type) type {
         pub fn validate(dst: *const table) ?[]const u8 {
             // Check the out handle separately from `FT_Init_FreeType`'s status.
             // Pass every non-null handle to `FT_Done_FreeType`.
-            var handle: ?*anyopaque = null;
+            var handle: dispatch.FT_Library = null;
             if (dst.FT_Init_FreeType(&handle) != 0) return "FT_Init_FreeType reported an error, so this provider could " ++
                 "not allocate a library and cannot serve one";
             if (handle == null) return "FT_Init_FreeType reported success and left a null library, " ++
