@@ -113,8 +113,8 @@ stdenv.mkDerivation {
       licence and provenance records the FreeType License requires to travel
       with it.
     '';
-    # FreeType's FTL has an advertising clause; NOTICE.md records licence scope and exceptions.
-    license = lib.licenses.unfree;
+    # NOTICE.md selects the FreeType License for upstream files without their own license.
+    license = lib.licenses.ftl;
     platforms = lib.platforms.unix;
   };
 }

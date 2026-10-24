@@ -1,5 +1,6 @@
 # Changelog
 
+- Mark Nix outputs with the FreeType License instead of an unfree license.
 - Install the public configuration-header closure for C consumers and custom-prefix system builds with either linkage.
 - Fix runtime provider validation and test diagnostics; forward custom system-library search prefixes to translation and the standalone consumer, preserving static or dynamic linkage.
 - Filter unsupported cross-check targets in dynamic and runtime-loaded builds without changing the selected artifact's linkage.
